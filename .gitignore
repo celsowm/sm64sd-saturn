@@ -1,1 +1,28 @@
-.external/sm64ds-decomp
+# Proprietary/local ROM content; NEVER commit extracted Nintendo assets.
+*.nds
+*.srl
+*.narc
+*.bmd
+*.bca
+*.btp
+*.bta
+*.bma
+*.kcl
+*.sdat
+*.iso
+*.cue
+*.bin
+
+# Local checkouts and generated conversion artifacts.
+.external/
+build/
+derived/
+generated/
+private/
+asset-output/
+.cache/
+
+# Python and local test state.
+__pycache__/
+*.pyc
+.pytest_cache/
