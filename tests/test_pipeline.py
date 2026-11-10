@@ -118,15 +118,97 @@ class ActualRomTests(unittest.TestCase):
         self.assertIn('MARIO_PREVIEW_TEXTURE_COUNT',hdr)
 
     def test_top_level_bmd_coverage(self):
+        """All 450 must parse; none may be counted as a tolerated failure."""
         from sm64ds_pipeline import Filesystem,convert_bmd
         fs=Filesystem.from_file(Path(os.environ['SM64DS_ROM']))
         models=[n for n in fs.by_name if n.endswith('.bmd')]
-        successes=0
+        self.assertEqual(len(models),450)
         for name in models:
-            try:convert_bmd(fs.read(name));successes+=1
-            except FormatError as e:
-                # Skybox/background-only records have no skeleton or faces.
-                if 'BMD bone count' not in str(e):raise
-        self.assertEqual((len(models),successes),(450,440))
+            with self.subTest(model=name):
+                m=convert_bmd(fs.read(name))
+                self.assertTrue(m.vertices)
+                self.assertTrue(m.faces)
+                self.assertEqual(len(m.faces),len(m.face_uvs))
+
+    def test_all_nested_narc_bmd_models(self):
+        """The same BMD decoder must continue to accept 52 nested models."""
+        from sm64ds_pipeline import Filesystem,Narc,convert_bmd
+        fs=Filesystem.from_file(Path(os.environ['SM64DS_ROM']))
+        count=0
+        for path in sorted(p for p in fs.by_name if p.endswith('.narc')):
+            archive=Narc(fs.read(path))
+            for index,name in archive.names.items():
+                if not name.endswith('.bmd'):continue
+                with self.subTest(model=path+':'+name):
+                    model=convert_bmd(fs.read(f'{path}:{index}'))
+                    self.assertTrue(model.faces)
+                    self.assertTrue(model.vertices)
+                count+=1
+        self.assertEqual(count,52)
+
+    def test_all_ten_skyboxes_emit_indexed_textures(self):
+        from sm64ds_pipeline import Filesystem,convert_bmd
+        from sm64ds_pipeline.skybox import emit_skybox,normalize_skybox
+        fs=Filesystem.from_file(Path(os.environ['SM64DS_ROM']))
+        skyboxes=[n for n in fs.by_name if n.startswith('data/vrbox/') and n.endswith('.bmd')]
+        self.assertEqual(len(skyboxes),10)
+        for name in sorted(skyboxes):
+            with self.subTest(model=name):
+                m=convert_bmd(fs.read(name))
+                self.assertEqual((m.scale_shift,len(m.bones)),(13,1))
+                header,source,report=emit_skybox(m,'skybox_check',tile_size=8)
+                self.assertEqual(report['scale_divisor'],512)
+                self.assertEqual(report['max_scale_quant_error'],0)
+                self.assertEqual(report['faces_without_texture'],0)
+                self.assertGreater(report['texture_tiles'],0)
+                self.assertLess(report['estimated_vdp1_texture_bytes'],262144)
+                self.assertIn('sat_model_asset_t skybox_check_model',source)
+                self.assertIn('SKYBOX_CHECK_SCALE_DIVISOR 512u',header)
+
+
+class SkyboxTests(unittest.TestCase):
+    """ROM-free validation of the high-scale static-background path."""
+
+    @staticmethod
+    def fixture():
+        return Model(
+            [Bone(0,-1,(0,0,0),(4096,4096,4096),(0,0,0))],
+            [Vertex(-29491,0,0,0),Vertex(29491,0,0,0),
+             Vertex(0,-15422,0,0),Vertex(0,15422,0,0)],
+            [(0,1,3,2)],13,0,0,0,{},
+            face_uvs=[((0.,0.),(7.,0.),(7.,7.),(0.,7.))],
+            face_materials=[0],material_textures=[])
+
+    def test_vrbox_exact_power_of_two_normalization(self):
+        from sm64ds_pipeline.skybox import normalize_skybox
+        m=self.fixture();geo=normalize_skybox(m)
+        self.assertEqual(geo.scale_divisor,512)
+        self.assertEqual(geo.vertices_fx16[0],(-29491*256,0,0))
+        self.assertEqual(geo.vertices_fx16[1],(29491*256,0,0))
+        self.assertEqual(geo.max_quant_error,0)
+        self.assertLess(geo.target_max_units,128)
+        self.assertGreater(geo.source_max_units,32767)
+        self.assertEqual(geo.vertices_fx16[3][1],15422*256)
+
+    def test_static_skybox_emit_without_fabricated_animation(self):
+        from sm64ds_pipeline.skybox import emit_skybox
+        m=self.fixture()
+        header,source,report=emit_skybox(m,'skybox_test',textured=False)
+        self.assertIn('SKYBOX_TEST_SCALE_DIVISOR 512u',header)
+        self.assertIn('sat_model_asset_t skybox_test_model',source)
+        self.assertNotIn('sat_skin_asset_t',source)
+        self.assertNotIn('sat_skeleton_clip_t',source)
+        self.assertEqual(report['kind'],'camera-relative-static-skybox')
+        self.assertEqual(report['native_quad_commands'],1)
+        self.assertEqual(report['faces_without_texture'],1)
+
+    def test_skybox_fail_closed_when_root_transform_is_nonidentity(self):
+        from sm64ds_pipeline.skybox import normalize_skybox
+        m=self.fixture()
+        m.bones[0]=Bone(0,-1,(4096,0,0),(4096,)*3,(0,)*3)
+        with self.assertRaises(FormatError):normalize_skybox(m)
+        with self.assertRaises(FormatError):normalize_skybox(self.fixture(),target_radius=0)
+
+
 
 if __name__=='__main__':unittest.main()
