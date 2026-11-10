@@ -112,7 +112,6 @@ def static_source(model: Model) -> StaticSource:
         is_triangle = face[2] == face[3]
         if not is_triangle:
             source_quads += 1
-        corners = (0, 1, 2) if is_triangle else (0, 1, 2, 3)
         face_tris = ((0, 1, 2),) if is_triangle else ((0, 1, 2), (0, 2, 3))
         for local_tri in face_tris:
             p = [model.vertices[face[c]] for c in local_tri]
