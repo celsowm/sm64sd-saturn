@@ -8,3 +8,4 @@ from .bca import Channel, Animation
 from .emit import emit_model
 from .textures import SourceTexture, decode_texture, bake_face, index_bakes
 from .skinning import build_layout
+from .skybox import SkyboxGeometry, normalize_skybox, emit_skybox
