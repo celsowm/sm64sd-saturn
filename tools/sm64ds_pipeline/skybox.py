@@ -67,7 +67,7 @@ def _format_bytes(values:bytes)->list[str]:
 
 
 def emit_skybox(model:Model, name:str, *, target_radius:int=128, textured:bool=True,
-                tile_size:int=16, texture_budget:int=262144)->tuple[str,str,dict]:
+                tile_size:int=16, texture_budget:int=262144, palette_base:int=1)->tuple[str,str,dict]:
     """Emit a plain static sat_model_asset_t plus its model-space metadata.
 
     The Saturn caller must set world translation to the *current camera eye*,
@@ -75,6 +75,8 @@ def emit_skybox(model:Model, name:str, *, target_radius:int=128, textured:bool=T
     background pass; this exporter does not claim to implement a sky renderer.
     """
     if not re.fullmatch('[a-z][a-z0-9_]*',name):raise FormatError('invalid C symbol prefix')
+    if not 1 <= palette_base <= 7:
+        raise FormatError('skybox palette bank must be in 1..7 (bank 0 reserved for Mario)')
     geo=normalize_skybox(model,target_radius)
     textures=[];palette=();face_tex=[65535]*len(model.faces)
     if textured:
@@ -123,11 +125,11 @@ def emit_skybox(model:Model, name:str, *, target_radius:int=128, textured:bool=T
                  f'    .face_texture_indices={name}_face_textures,',
                  f'    .textures={name}_textures, .texture_count={len(textures)},' if textures else
                      '    .textures=0, .texture_count=0,',
-                 f'    .palettes_rgb555={name}_palette, .palette_count=1, .palette_base=0,' if textures else
+                 f'    .palettes_rgb555={name}_palette, .palette_count=1, .palette_base={palette_base},' if textures else
                      '    .palettes_rgb555=0, .palette_count=0,',
                  '};',''])
     report={
-        'output':name,'kind':'camera-relative-static-skybox',
+        'output':name,'kind':'camera-relative-static-skybox','palette_base':palette_base,
         'source_scale_shift':model.scale_shift,
         'scale_divisor':geo.scale_divisor,
         'source_max_abs_coordinate':geo.source_max_units,
@@ -139,7 +141,8 @@ def emit_skybox(model:Model, name:str, *, target_radius:int=128, textured:bool=T
         'estimated_vdp1_texture_bytes':vram,'faces_without_texture':face_tex.count(65535),
         'requirements':['position shell at camera.eye every frame',
                         'cull_backfaces=0 (view from inside)',
-                        'submit in background pass; validate paint order',
+                        'submit pass 0, actors pass 1',
+                        'reserve RGB555 palette bank 0 for Mario',
                         'no collision or world-scale gameplay semantics'],
         'notes':['This is a normalized static background, not original DS world coordinates',
                  'ROM-derived C/H must remain private',
