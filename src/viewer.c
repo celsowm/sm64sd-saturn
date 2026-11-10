@@ -191,7 +191,11 @@ int main(void) {
         camera.target=g_orbit.target;
         camera.up=(sat_vec3_t){0,SAT_FX16_ONE,0};
         camera.view_proj=g_orbit.view_proj;
-        SAT_PANIC_IF_ERROR(sat_scene_begin(&g_scene,&camera,SAT_FX16_ONE,W,H,16u));
+        camera.fov_y=g_orbit.fov_y;
+        camera.aspect=g_orbit.aspect;
+        camera.near_z=g_orbit.near_z;
+        camera.far_z=g_orbit.far_z;
+        SAT_PANIC_IF_ERROR(sat_scene_begin(&g_scene,&camera,g_orbit.near_z,W,H,16u));
 #if SM64DS_ENABLE_SKYBOX
         /* Two passes; one painter flush. Backdrop never occludes Mario. */
         SAT_PANIC_IF_ERROR(sm64ds_background_submit(&g_background,&g_scene,
