@@ -7,10 +7,22 @@ if(NOT DEFINED SM64DS_GENERATED_DIR OR NOT EXISTS "${SM64DS_GENERATED_DIR}/mario
 endif()
 
 find_package(LibSaturn 0.1 CONFIG REQUIRED)
-add_executable(sm64ds_viewer
+option(SM64DS_ENABLE_SKYBOX "Render camera-following skybox alongside Mario" OFF)
+set(viewer_sources
   src/viewer.c
   runtime/sm64ds_pose.c
+  runtime/sm64ds_background.c
   "${SM64DS_GENERATED_DIR}/mario_preview.c")
+if(SM64DS_ENABLE_SKYBOX)
+  if(NOT EXISTS "${SM64DS_GENERATED_DIR}/skybox_preview.c" OR
+     NOT EXISTS "${SM64DS_GENERATED_DIR}/skybox_preview.h")
+    message(FATAL_ERROR "SM64DS_ENABLE_SKYBOX requires locally generated skybox_preview.c/.h")
+  endif()
+  list(APPEND viewer_sources "${SM64DS_GENERATED_DIR}/skybox_preview.c")
+endif()
+add_executable(sm64ds_viewer ${viewer_sources})
+target_compile_definitions(sm64ds_viewer PRIVATE
+  SM64DS_ENABLE_SKYBOX=$<BOOL:${SM64DS_ENABLE_SKYBOX}>)
 target_include_directories(sm64ds_viewer PRIVATE
   "${CMAKE_SOURCE_DIR}/runtime"
   "${SM64DS_GENERATED_DIR}")
