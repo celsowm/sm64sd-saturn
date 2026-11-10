@@ -33,10 +33,19 @@ Do not port all 100+ DS overlays, all player states, minigames, touch-screen men
 | Scene and renderer | [CHARACTER_RENDERING_3D.md](https://github.com/celsowm/libsaturn/blob/main/docs/CHARACTER_RENDERING_3D.md) | Painter queue, LOD, clip fallback, transparency limits |
 | Collision | [collide3d.h](https://github.com/celsowm/libsaturn/blob/main/include/saturn/collide3d.h) | Bounded mesh/AABB/sphere queries; **not** 1:1 DS KCL semantics |
 | Native build | [PACKAGING.md](https://github.com/celsowm/libsaturn/blob/main/docs/PACKAGING.md) | Installed CMake SDK, toolchain and disc builder |
+| Local source ROM audit | [ROM_AUDIT.md](ROM_AUDIT.md) | Verified ASME Rev.00 metadata, nested NARC Mario model and initial course costs |
 
 **Dependency policy:** Record tested upstream and LibSaturn commit SHAs in a machine-readable manifest. Keep LibSaturn separate and installed, not copied into this repo. Keep the upstream decomp under ignored .external/ (or obtain it with a documented fetch script). No unaudited remote HEAD changes in a release build. Read current header signatures before implementation: names and layouts here are references, not proof that unimplemented adapters exist.
 
 **Copyright / provenance:** No ROM, retail Nintendo textures/music/models, extracted binary assets or generated derivative asset bundles in public commits. A legitimately obtained local dump is supplied by the developer. Tests must also work on original self-authored fixtures so CI does not need proprietary material. Review upstream license and the distinction between original decomp source and Nintendo-owned game content before distributing anything.
+
+### 2.1 Verified ROM-specific constraints (local ASME Rev.00)
+
+A read-only audit of the user-supplied USA Rev.00 image has now been completed; see **[ROM_AUDIT.md](ROM_AUDIT.md)** for provenance, exact IDs, compressed/raw byte counts and test candidates. This verifies **1,936 FAT entries (1,833 named NitroFS files and 103 unnamed ARM9 overlays)**, plus nested assets inside eight NARC containers. It does **not** yet verify the 0x80A-entry game runtime-handle table.
+
+**Asset pipeline dependency change:** the usable 16-bone gameplay Mario model is **NOT** the top-level one-bone \`data/player/b_mario_all.bmd\`. The matching 16-bone model is \`ARCHIVE/arc0.narc\` (NitroFS ID **105**), **NARC index 131**: \`data/player/mario_model.bmd\`. Animation candidates \`su_wait\`, \`su_walk\`, \`su_run\`, \`su_jump\` are top-level NitroFS files **858/859/857/855**, respectively, and contain **16 BCA bone tracks** each. Thus **NARC traversal + LZ77 unpacking are Gate 1 prerequisites**, not late-stage extras. Initial rigid-joint skinning is favored by that model's zero weighted-matrix count; runtime visual/behavioral verification is still required.
+
+The smallest BMD/KCL test is \`test_map_b\` (NitroFS 1537/1536, 3 KCL prisms). \`main_garden\` is a lighter first scenic-level candidate (BMD/KCL 1474/1472; 597 prisms) than \`bombhei_map\` (1291/1289; 930 prisms). These are **source-data observations only**; do not infer SH-2 or VDP1 performance from compressed ROM sizes.
 
 ## 3. Proposed architecture
 
@@ -54,7 +63,7 @@ Original SM64DS behavior + upstream PC-port oracle
     SH-2 / VDP1 / VDP2 / SCSP / CD block
 
 Host-side asset build (separate process):
-Local .nds -> verified catalog -> BMD/BCA/KCL/texture/SDAT parsers
+Local .nds -> verified catalog -> NitroFS/NARC/LZ77 resolver -> BMD/BCA/KCL/texture/SDAT parsers
            -> validated intermediate representation
            -> Saturn mesh/skin/clip/texture/collider packages
            -> disc assets + manifest with offsets, sizes and hashes
@@ -123,6 +132,7 @@ Build a typed host IR for mesh topology, unique vertices, face materials, textur
 - Decode display-list operations and matrix references; do **not** assume each material is a simple triangle list.
 - Verify bone-ID versus record-position mapping. The upstream PC-port documentation explicitly notes a known issue involving nonsequential bone IDs in the host parser; fix/validate independently rather than cloning its bug.
 - Rebuild topology with deliberate quad handling/triangulation, seam duplication as required by materials, and strict index bounds.
+- Resolve both top-level NitroFS assets **and nested NARC assets** by fully-qualified identity (outer file ID/path, inner index/path). Decode `LZ77`-prefixed streams before reading their BMD/BCA/KCL structures.
 - Convert DS palette/texture formats offline into a tested LibSaturn indexed texture path. Document unsupported blend modes and UV transforms; never silently equate DS and VDP1 material models.
 
 **BCA import and animation:** LibSaturn already supports:
@@ -246,19 +256,19 @@ No speculative FPS percentages. **30 displayed frames/s at 320x224** is an *init
 
 ### Gate 1 — numeric and format oracles
 
-**Build:** local-only asset extraction + validated manifest; native-to-fixed math adapter; independent host tests; model IR from one small BMD; a *synthetic* geometry fixture in CI. Fix and prove bone record-ID mapping. Compare parsed materials/matrices/geometry to the upstream PC smoke-model path.
+**Build:** local-only NitroFS **and NARC** parsing, game-specific LZ77 unpacking and validated manifest; native-to-fixed math adapter; independent host tests; model IR from `test_map_b` plus a *synthetic* geometry fixture in CI. Then resolve **`ARCHIVE/arc0.narc:131`** and inspect Mario's 16-bone hierarchy. Fix and prove bone record-ID mapping. Compare parsed materials/matrices/geometry to the upstream PC smoke-model path.
 
 **Pass:** tested 20.12↔16.16 behavior, exact source asset identity, bounded parser, reproducible topology and diagnostic errors for unsupported commands.
 
 ### Gate 2 — Mario appears on Saturn
 
-**Build:** render Mario's static model from local converted assets. Prove indexed textures, palette ownership, face winding, near clipping, camera orbit and object-level culling. Keep an original test character as the CI fixture.
+**Build:** render the actual Mario model at `arc0.narc:131` from local converted assets, and test its separate head attachment where applicable. Do **not** substitute `b_mario_all.bmd` without evidence. Prove indexed textures, palette ownership, face winding, near clipping, camera orbit and object-level culling. Keep an original test character as the CI fixture.
 
 **Pass:** captured, correctly textured Mario from front/side/back; no reversed faces, out-of-bounds uploads or unaccounted VDP1 command rejections.
 
 ### Gate 3 — actual runtime skeletal animation
 
-**Build:** import Mario hierarchy + selected BCA clips, export skeleton/skin/native clips or SKA1, sample joints on Saturn, deform into actor-owned vertices and submit scene instance. Serial Master first; optionally compare a parallel Slave variant. Do not make per-frame baked vertices the default.
+**Build:** import the verified **16-bone** Mario hierarchy + 16-track `su_wait`/`su_walk`/`su_run`/`su_jump` BCA candidates, export skeleton/rigid skin/native clips or SKA1, sample joints on Saturn, deform into actor-owned vertices and submit scene instance. First verify these are the gameplay-selected clips against original source resource bindings. Serial Master first; optionally compare a parallel Slave variant. Do not make per-frame baked vertices the default.
 
 **Pass:** rest/walk/jump samples match golden source poses to stated tolerances; valid render and bounded pose memory; deterministic clip switching; independent actor instances.
 
@@ -270,7 +280,7 @@ No speculative FPS percentages. **30 displayed frames/s at 320x224** is an *init
 
 ### Gate 5 — small playable course
 
-**Build:** choose between Castle Grounds and Bob-omb Battlefield based on the **actual measured asset/geometry costs**, not nostalgia. Stream or preload course chunks as required. Add a coin, one enemy/hazard, a collectible goal, health/goal HUD, restart and victory state. Exercise actor lifecycle and scene depth ordering.
+**Build:** prefer the measured smaller **`main_garden`** as the initial scenic candidate, then compare to **`bombhei_map`** (Bob-omb Battlefield) using *converted* geometry/texture/VRAM/command costs before fixing the playable course. Stream or preload course chunks as required. Add a coin, one enemy/hazard, a collectible goal, health/goal HUD, restart and victory state. Exercise actor lifecycle and scene depth ordering.
 
 **Pass:** full unattended input replay from spawn to goal on Ymir/Mednafen; no dead end; screenshots of several camera angles; complete memory and per-frame timing report.
 
