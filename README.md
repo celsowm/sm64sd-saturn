@@ -17,12 +17,13 @@ Experimental, source-level port to a **stock Sega Saturn**, referencing [sm64ds-
 | `bca.py` | BCA rotations, translations and animated scale sampling |
 | `skinning.py` | rigid and up-to-three-influence LibSaturn skin anchors |
 | `emit.py` | LibSaturn C/H model, skin, skeleton and clip export |
-| `skybox.py` | bounded camera-relative static skybox conversion and textures |
+| `skybox.py` | camera-relative static background conversion and coordinate normalization |
 | `cli.py` | argument validation, input/output orchestration |
 | `runtime/sm64ds_pose.c` | Saturn-side scale sampling and parent-first T·R·S world matrices |
-| `runtime/sm64ds_background.c` | Camera-centred static skybox, separate palette and safe scene admission |\n| `src/viewer.c` | Saturn model, indexed textures, animated skin, optional skybox, camera and telemetry |
+| `runtime/sm64ds_background.c` | Camera-following textured skybox, palette isolation, bounded scene admission |
+| `src/viewer.c` | Saturn scene integration, indexed textures, animated skin, orbit camera, optional skybox and telemetry |
 
-**Status:** 26/26 tests pass with the locally supplied ASME USA Rev.00 ROM. All **450/450** top-level BMDs and **52/52** nested NARC BMDs parse without exemptions; all ten previously missing skyboxes export as textured static C/H.  The generated Mario model has 16 joints, 131 rigid vertices, 246 VDP1 faces and 208 deduplicated indexed8 texture tiles (~52 KiB pixel payload). **This is not an emulator or hardware boot result.**
+**Status:** 26/26 tests pass with the locally supplied ASME USA Rev.00 ROM. **450/450** top-level BMDs and **52/52** nested NARC BMDs parse without exemptions; ten skyboxes also export textured static C/H files. The generated Mario model has 16 joints, 131 rigid vertices, 246 VDP1 faces and 208 deduplicated indexed8 texture tiles (~52 KiB pixel payload). **This is not an emulator or hardware boot result.**
 
 ## Build locally (ROM not distributed)
 
@@ -51,26 +52,32 @@ The CMake viewer links the installed `LibSaturn::Saturn`; it does **not** downlo
 
 ### Background models / skyboxes
 
-The ten models data/vrbox/vr02.bmd to vr11.bmd have scaleShift=13.
-They require a camera-relative STATIC background exporter rather than
-character skinning: source radius ~58,982 cannot fit Saturn 16.16 world
-coordinates. A uniform divisor of 512 produces bounded geometry of radius
-~115.20 with zero quantization error for these ten files.
+`data/vrbox/vr02.bmd` to `vr11.bmd` use `scaleShift=13`, resulting in
+source coordinates reaching 58,982. Use **`--kind skybox`** to export them
+as bounded static `sat_model_asset_t` background meshes (default normalized
+radius 128, divisor 512 for the ten verified files). Never treat these
+camera-relative models as world-scale collision meshes.
 
-    python3 tools/sm64ds_convert.py \
-      --rom '/private/Super Mario 64 DS (USA).nds' \
-      --kind skybox --model data/vrbox/vr02.bmd \
-      --out /private/derived/vr02 --name vr02
+```sh
+python3 tools/sm64ds_convert.py \
+  --rom '/private/path/Super Mario 64 DS (USA).nds' \
+  --kind skybox --model data/vrbox/vr02.bmd \
+  --out /private/derived/vr02 --name vr02
+```
 
-To render Mario and a background together, emit the skybox in the **same
-private output directory** as Mario, using `--name skybox_preview` and
-`--model data/vrbox/vr02.bmd`. Configure CMake with
-`-DSM64DS_ENABLE_SKYBOX=ON` (OFF by default). The background follows
-`camera.eye`, uses indexed8 palette bank **1** instead of Mario's bank
-**0**, paints in pass **0** (Mario in pass **1**) and disables backface
-culling. No emulator picture parity is claimed. See
-[skybox coverage](docs/SKYBOX_COVERAGE.md) and
-[combined viewer rendering guide](docs/BACKGROUND_RENDERING.md).
+To render a background alongside Mario, generate it into the **same**
+private directory using `--name skybox_preview` (instead of `vr02`), then
+configure CMake with `-DSM64DS_ENABLE_SKYBOX=ON`. The runtime places the
+shell at the camera eye, draws it without backface culling in **pass 0**, and
+puts Mario in **pass 1**. Palette bank **1** for the skybox avoids overwriting
+Mario's palette bank 0. This is testable source integration; **no
+emulator/hardware picture-equivalence is claimed.** See
+[skybox audit](docs/SKYBOX_COVERAGE.md) and
+[background renderer/build instructions](docs/BACKGROUND_RENDERING.md).
+
+### World HLOD (castle exterior and garden)
+
+A new `--kind world-hlod` converter bridges the real DS BMD material/UV topology to the LibSaturn `model_pipeline.world_hlod` simplifier and WLH1 packer. See [world HLOD integration](docs/WORLD_HLOD_INTEGRATION.md) for the command, verified real-ROM counts and remaining rendering/VRAM gates. Generated geometry and reports stay private. This is not yet a playable outdoor level.
 
 See [converter technical details](docs/CONVERTER.md), [port plan](docs/PORT_PLAN.md), [ROM audit](docs/ROM_AUDIT.md), and [current status](docs/PORT_STATUS.md).
 
