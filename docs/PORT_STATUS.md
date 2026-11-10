@@ -29,3 +29,25 @@ No copyrighted asset bytes were committed. Generated assets are local-only.
 - **502/502** source BMD files now parse (450 NitroFS + 52 NARC); **22/22** local tests pass; no-ROM test run: 14 pass, 8 skip.
 
 Pending: real SH-2/installed SDK link, emulator rendering/parity, material alpha and painter pass performance. See [SKYBOX_COVERAGE.md](SKYBOX_COVERAGE.md).
+
+## Background scene integration (2026-11-10)
+
+- `runtime/sm64ds_background.c/.h` implements camera-eye translation,
+  static asset initialization and upload-once textures. It checks all face
+  material mappings, capacity and overflow before scene submission.
+- Skybox indexed8 palette defaults to **bank 1**; Mario is **bank 0**.
+  LibSaturn model upload honors `asset->palette_base`.
+- `src/viewer.c` supports optional `skybox_preview.c/.h` through CMake flag
+  `SM64DS_ENABLE_SKYBOX=ON`, painter background pass 0/actor pass 1,
+  a shared queue, trusted flush and live scene command statistics.
+- **26/26 local tests passed** with the ASME image, including a host-compiled
+  executable that tests camera-follow, palette guard, capacity admission and
+  fixed-point overflow. Generated assets passed host C11 syntax checks.
+- Example vr02 + Mario: **372 faces** and **67,328 texture pixel bytes**.
+  These are host estimates; actual VDP1 command usage/SH-2 cycles are **not
+  measured yet**.
+
+Next acceptance: install SH-2 compiler/LibSaturn, build the private disc,
+boot in Ymir, verify skybox image and pass ordering, compare against DS/PC
+reference, and capture actual `g_sm64ds_viewer_stats` measurements.
+See [BACKGROUND_RENDERING.md](BACKGROUND_RENDERING.md).
