@@ -61,7 +61,13 @@ def convert_bmd(blob:bytes)->Model:
     if len(data)<0x38:raise FormatError('truncated BMD')
     shift=data[0]; nb=field(data,4,'I')
     num_weighted=field(data,0x30,'I')
-    if not 1<=nb<=255 or shift>12:raise FormatError('BMD bone count or scaleShift unsupported')
+    # The ten vrbox backgrounds use scaleShift=13.  This is a legal DS
+    # source scale (their geometry reaches ~58,982 world units), but it is NOT
+    # directly representable by a 16.16 Saturn world coordinate.  The BMD
+    # parser must preserve that scale; the dedicated skybox exporter later
+    # normalizes it in camera-relative space instead of wrapping an int32.
+    if not 1<=nb<=255 or shift>13:
+        raise FormatError('BMD bone count or scaleShift unsupported (tested through 13)')
     if num_weighted>255:raise FormatError('more than 255 weighted BMD matrices')
     bones_at=field(data,8,'I')
     bones=[]
