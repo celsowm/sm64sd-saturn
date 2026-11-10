@@ -14,6 +14,7 @@ The public source tree contains a **local-ROM asset compiler** and a LibSaturn *
 - `bca.py`: 9 BCA channels per bone, keyframe/tail interpolation, circular 12-bit rotations, scales preserved.
 - `skinning.py`: inverse-rest local anchors for up to 3 weighted influences, Q15 weights, quantization and rigid-first vertex layout.
 - `emit.py`: generated LibSaturn model/skeleton/skin/clip descriptors and private C/H output.
+- `skybox.py`: validated static skybox exporter and power-of-two camera-relative normalization.
 - `runtime/sm64ds_pose.c`: interpolated BCA scales in 16.16; builds world matrices in parent-first order (T×R×S) for `sat_skin_update_mesh` without modifying the LibSaturn API.
 - `src/viewer.c`: actual LibSaturn API wiring for model validation, texture uploads, animated mesh, canonical scene and orbit camera.
 
@@ -43,8 +44,8 @@ Output: `mario_preview.c`, `mario_preview.h`, `mario_preview.json` (game-derived
 
 | Local USA Rev.00 source | Value |
 |---|---:|
-| Top-level BMD parsed | 440 / 450 |
-| Unsupported top-level BMD | 10 high-scale `vrbox` skyboxes (`scaleShift=13`) |
+| Top-level BMD parsed | **450 / 450** |
+| Formerly unsupported high-scale skyboxes | **10 / 10** converted as static backgrounds |
 | Mario skeletal joints | 16 |
 | Mario source vertices | 131 rigid + 0 weighted |
 | Mario VDP1 faces | 246 |
@@ -52,7 +53,7 @@ Output: `mario_preview.c`, `mario_preview.h`, `mario_preview.json` (game-derived
 | Deduplicated VDP1 indexed8 face tiles, size 16×16 | 208 |
 | VDP1 face texture pixel bytes (excluding command/other VRAM) | 53,248 |
 | BCA frames idle/walk/run/jump | 120 / 30 / 30 / 11 |
-| ROM-free + optional local ROM tests | 17 total with ROM, pass |
+| ROM-free + optional local ROM tests | **22 / 22** with ROM, 14 passed and 8 skipped otherwise |
 | Generated C and scale-runtime C syntax | Host GCC `-std=c11 -Wall -Wextra -Werror` with API-shape stubs, pass |
 
 The source RGBA colors are converted to a single RGB555 palette of up to 255 opaque colors plus transparent index 0. When source alpha is fractional, **alpha is thresholded at 128**. The exporter reports the VDP1 pixel budget but **not** frame buffer, scene commands, head, music or other VRAM costs. Numeric counts do not prove rendered fidelity.
@@ -75,7 +76,11 @@ BCA translation/rotation are emitted in existing `sat_skeleton_clip_t`. Scale is
 - Level effects/lighting, DS material SRT, transparent polygons, color blending and runtime BTP texture-sequence animation.
 - Head/face attachment and exact Mario silhouette/pose parity; the one-source-texture body is not the complete character presentation.
 - Quads are exported as VDP1 canonical UV-baked tiles with nearest-neighbor sampling: this differs from the DS hardware's perspective-correct rasterizer and needs screenshot comparisons.
-- 10 `vrbox` BMDs with high scale shift need a separate static skybox/background importer rather than pretending they are character skins.
+- The high-scale skybox C emitter still needs native background-pass integration and visual parity testing.
 - Proven measured frame rate and Saturn execution. All present timings remain assumptions until tested.
 
 Sources: [DS matched BMD](https://github.com/tangosdev/sm64ds-decomp/blob/main/include/BMD_File.h), [BCA interpolation](https://github.com/tangosdev/sm64ds-decomp/blob/main/src/func_0204547c.cpp), [LibSaturn Skin3D](https://github.com/celsowm/libsaturn/blob/main/include/saturn/skin3d.h), [model](https://github.com/celsowm/libsaturn/blob/main/include/saturn/model3d.h) and [package consumer](https://github.com/celsowm/libsaturn/blob/main/docs/PACKAGING.md).
+
+## Fully parsed BMD formats: 502 / 502 (2026-11-10)
+
+All **450** top-level NitroFS BMDs and **52** nested NARC BMDs now parse without tolerated failures. The ten previously rejected VRBOX backgrounds have legal source scaleShift=13 and require separate static presentation. The dedicated [skybox exporter](../tools/sm64ds_pipeline/skybox.py) uses uniform divisor 512 for all ten verified source assets, preserving proportions and UVs within Saturn 16.16 range. Ten private textured C/H exports passed C11 syntax checks using matching stub declarations. See [SKYBOX_COVERAGE.md](SKYBOX_COVERAGE.md) for commands, limits and measurements. **No real SH-2 link or emulator validation was performed.**
