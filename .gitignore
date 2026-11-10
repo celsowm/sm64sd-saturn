@@ -9,6 +9,8 @@
 *.bma
 *.kcl
 *.sdat
+*.wlh
+*.materials.json
 *.iso
 *.cue
 *.bin
