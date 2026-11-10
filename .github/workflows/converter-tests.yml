@@ -1,0 +1,20 @@
+name: Converter tests (ROM-free)
+on:
+  push:
+    paths:
+      - 'tools/sm64ds_convert.py'
+      - 'tests/test_converter.py'
+      - '.github/workflows/converter-tests.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: No-ROM unit tests
+        run: python3 -m unittest discover -s tests -v
