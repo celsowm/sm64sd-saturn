@@ -46,3 +46,16 @@ The instance world origin must follow camera.eye each frame; its cull_backfaces 
 - 22 / 22 Python tests passed with the private ROM; without it, 14 pass and 8 are skipped.
 
 Remaining: SH-2 compile, installed LibSaturn package link, Ymir/Mednafen images, exact material alpha and background pass parity, and runtime performance.
+
+## Viewer integration (2026-11-10)
+
+The static exporter now defaults to indexed8 **palette bank 1**, reserving
+bank 0 for Mario. The new independent `runtime/sm64ds_background.c` uses
+one-time texture upload, camera-relative translation, no backface culling,
+pass 0 background (Mario pass 1), and bounds-checked queue admission.
+Build with `-DSM64DS_ENABLE_SKYBOX=ON` after privately generating
+`skybox_preview.c/.h` beside `mario_preview.c/.h`.
+
+Host tests pass, but **no native SH-2 link, emulator frame or visual parity
+has yet been measured**. Consult [BACKGROUND_RENDERING.md](BACKGROUND_RENDERING.md)
+for command-budget telemetry, build steps and remaining hardware gates.
