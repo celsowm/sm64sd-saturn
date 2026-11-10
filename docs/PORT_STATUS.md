@@ -8,15 +8,24 @@
 - BMD weighted matrix parsing and up-to-three-influence inverse-rest anchors added, with synthetic tests. This USA ROM contains 0 weighted BMD matrices across 502 inspected models.
 - Animated per-joint BCA scale channels are sampled and emitted separately; Saturn runtime helper computes dynamic T*R*S world matrices for `sat_skin_update_mesh`, without altering LibSaturn's pose ABI.
 - `src/viewer.c` and root `CMakeLists.txt` wire generated private Mario C/H into the actual LibSaturn model, texture upload, skinning and canonical 3D scene API.
-- **17/17 Python tests passed with local ASME Rev.00 ROM.** 440 / 450 top-level source BMDs parsed. Mario: 16 joints, 131 rigid vertices, 246 faces, 208 texture tiles, 53,248 texture-pixel bytes, 4 candidate BCA clips.
+- **22/22 Python tests passed with local ASME Rev.00 ROM.** 450/450 top-level BMDs and 52/52 NARC BMDs parsed. Mario: 16 joints, 131 rigid vertices, 246 faces, 208 texture tiles, 53,248 texture-pixel bytes, 4 candidate BCA clips.
 - Generated Mario C and scale runtime C passed host C11 syntax-only checks with equivalent LibSaturn declarations.
 
 ## Still pending
 
 - **No native SH-2 link or emulator/hardware boot yet**. The dev environment lacks the toolchain and installed LibSaturn. Viewer is source integration, not demonstrated rendering.
 - Texture UV and animation visual parity against the original DS and upstream PC oracle, head attachment and full material SRT/alpha/lighting correctness.
-- Ten 1-bone skyboxes with `scaleShift=13` need separate static background handling.
+- Ten 1-bone high-scale skyboxes now export textured static C/H, but still need native renderer integration and screenshots.
 - Scene collision / KCL/CLPS, Mario control/physics, real game loop and course content.
 - Full sound and audio synchronization, calibrated rate/frame budget, memory pressure under level load and stress cases.
 
 No copyrighted asset bytes were committed. Generated assets are local-only.
+
+## 450/450 BMD gate closed (2026-11-10)
+
+- The formerly rejected files data/vrbox/vr02.bmd through vr11.bmd use valid scaleShift=13, not malformed data.
+- Dedicated camera-relative static conversion scales source extrema 58,982 to 115.1992 with uniform divisor 512, exactly representable in Saturn 16.16.
+- All ten textures + face maps exported privately, without uncovered faces; ten C11 syntax checks passed against matching headers.
+- **502/502** source BMD files now parse (450 NitroFS + 52 NARC); **22/22** local tests pass; no-ROM test run: 14 pass, 8 skip.
+
+Pending: real SH-2/installed SDK link, emulator rendering/parity, material alpha and painter pass performance. See [SKYBOX_COVERAGE.md](SKYBOX_COVERAGE.md).
