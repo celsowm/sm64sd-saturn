@@ -20,9 +20,9 @@ Experimental, source-level port to a **stock Sega Saturn**, referencing [sm64ds-
 | `skybox.py` | bounded camera-relative static skybox conversion and textures |
 | `cli.py` | argument validation, input/output orchestration |
 | `runtime/sm64ds_pose.c` | Saturn-side scale sampling and parent-first T·R·S world matrices |
-| `src/viewer.c` | Saturn scene integration, indexed textures, animated skin, orbit camera and clip switching |
+| `runtime/sm64ds_background.c` | Camera-centred static skybox, separate palette and safe scene admission |\n| `src/viewer.c` | Saturn model, indexed textures, animated skin, optional skybox, camera and telemetry |
 
-**Status:** 22/22 tests pass with the locally supplied ASME USA Rev.00 ROM. All **450/450** top-level BMDs and **52/52** nested NARC BMDs parse without exemptions; all ten previously missing skyboxes export as textured static C/H.  The generated Mario model has 16 joints, 131 rigid vertices, 246 VDP1 faces and 208 deduplicated indexed8 texture tiles (~52 KiB pixel payload). **This is not an emulator or hardware boot result.**
+**Status:** 26/26 tests pass with the locally supplied ASME USA Rev.00 ROM. All **450/450** top-level BMDs and **52/52** nested NARC BMDs parse without exemptions; all ten previously missing skyboxes export as textured static C/H.  The generated Mario model has 16 joints, 131 rigid vertices, 246 VDP1 faces and 208 deduplicated indexed8 texture tiles (~52 KiB pixel payload). **This is not an emulator or hardware boot result.**
 
 ## Build locally (ROM not distributed)
 
@@ -62,9 +62,15 @@ coordinates. A uniform divisor of 512 produces bounded geometry of radius
       --kind skybox --model data/vrbox/vr02.bmd \
       --out /private/derived/vr02 --name vr02
 
-The generated skybox follows the camera eye, renders from inside with backface
-culling disabled, and needs an appropriate background pass. No emulator picture
-parity is claimed. See [skybox coverage](docs/SKYBOX_COVERAGE.md).
+To render Mario and a background together, emit the skybox in the **same
+private output directory** as Mario, using `--name skybox_preview` and
+`--model data/vrbox/vr02.bmd`. Configure CMake with
+`-DSM64DS_ENABLE_SKYBOX=ON` (OFF by default). The background follows
+`camera.eye`, uses indexed8 palette bank **1** instead of Mario's bank
+**0**, paints in pass **0** (Mario in pass **1**) and disables backface
+culling. No emulator picture parity is claimed. See
+[skybox coverage](docs/SKYBOX_COVERAGE.md) and
+[combined viewer rendering guide](docs/BACKGROUND_RENDERING.md).
 
 See [converter technical details](docs/CONVERTER.md), [port plan](docs/PORT_PLAN.md), [ROM audit](docs/ROM_AUDIT.md), and [current status](docs/PORT_STATUS.md).
 
