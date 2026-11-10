@@ -17,11 +17,12 @@ Experimental, source-level port to a **stock Sega Saturn**, referencing [sm64ds-
 | `bca.py` | BCA rotations, translations and animated scale sampling |
 | `skinning.py` | rigid and up-to-three-influence LibSaturn skin anchors |
 | `emit.py` | LibSaturn C/H model, skin, skeleton and clip export |
+| `skybox.py` | bounded camera-relative static skybox conversion and textures |
 | `cli.py` | argument validation, input/output orchestration |
 | `runtime/sm64ds_pose.c` | Saturn-side scale sampling and parent-first T·R·S world matrices |
 | `src/viewer.c` | Saturn scene integration, indexed textures, animated skin, orbit camera and clip switching |
 
-**Status:** 17 host tests pass with the locally supplied ASME USA Rev.00 ROM, and 440/450 top-level BMDs parse (10 skybox models require a separate static high-scale path). The generated Mario model has 16 joints, 131 rigid vertices, 246 VDP1 faces and 208 deduplicated indexed8 texture tiles (~52 KiB pixel payload). **This is not an emulator or hardware boot result.**
+**Status:** 22/22 tests pass with the locally supplied ASME USA Rev.00 ROM. All **450/450** top-level BMDs and **52/52** nested NARC BMDs parse without exemptions; all ten previously missing skyboxes export as textured static C/H.  The generated Mario model has 16 joints, 131 rigid vertices, 246 VDP1 faces and 208 deduplicated indexed8 texture tiles (~52 KiB pixel payload). **This is not an emulator or hardware boot result.**
 
 ## Build locally (ROM not distributed)
 
@@ -47,6 +48,23 @@ cmake --build build --target sm64ds_viewer_disc
 ```
 
 The CMake viewer links the installed `LibSaturn::Saturn`; it does **not** download/clone the SDK. On the controller: **A** auto-orbit, **B** camera reset, **C** next animation, D-pad orbit, L/R zoom. The generated C/H and linked disc are private, user-owned derivative assets. No ROM content belongs in public Git.
+
+### Background models / skyboxes
+
+The ten models data/vrbox/vr02.bmd to vr11.bmd have scaleShift=13.
+They require a camera-relative STATIC background exporter rather than
+character skinning: source radius ~58,982 cannot fit Saturn 16.16 world
+coordinates. A uniform divisor of 512 produces bounded geometry of radius
+~115.20 with zero quantization error for these ten files.
+
+    python3 tools/sm64ds_convert.py \
+      --rom '/private/Super Mario 64 DS (USA).nds' \
+      --kind skybox --model data/vrbox/vr02.bmd \
+      --out /private/derived/vr02 --name vr02
+
+The generated skybox follows the camera eye, renders from inside with backface
+culling disabled, and needs an appropriate background pass. No emulator picture
+parity is claimed. See [skybox coverage](docs/SKYBOX_COVERAGE.md).
 
 See [converter technical details](docs/CONVERTER.md), [port plan](docs/PORT_PLAN.md), [ROM audit](docs/ROM_AUDIT.md), and [current status](docs/PORT_STATUS.md).
 
