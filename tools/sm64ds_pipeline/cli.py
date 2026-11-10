@@ -8,6 +8,7 @@ from .filesystem import Filesystem
 from .bmd import convert_bmd
 from .bca import Animation
 from .emit import emit_model
+from .skybox import emit_skybox
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -16,6 +17,10 @@ def main(argv=None):
     parser.add_argument('--clip',action='append',default=[],help='name=NitroFS/path.bca (repeat)')
     parser.add_argument('--out',type=Path,required=True,help='Private generated-output directory')
     parser.add_argument('--name',default='mario_preview')
+    parser.add_argument('--kind',choices=['character','skybox'],default='character',
+                        help='Character: BMD+BCA skinned asset. Skybox: normalized static camera-local background.')
+    parser.add_argument('--skybox-radius',type=int,default=128,
+                        help='Target maximum absolute coordinate of camera-local skybox')
     parser.add_argument('--rate-num',type=int,default=30,help='Explicit nominal clip-rate numerator')
     parser.add_argument('--rate-den',type=int,default=1,help='Clip-rate denominator')
     parser.add_argument('--untextured',action='store_true',help='Emit rig-only geometry')
@@ -24,6 +29,19 @@ def main(argv=None):
     a=parser.parse_args(argv)
     fs=Filesystem.from_file(a.rom)
     model=convert_bmd(fs.read(a.model))
+    if a.kind=='skybox':
+        if a.clip:raise FormatError('--clip is invalid for a static skybox')
+        header,source,report=emit_skybox(
+            model,a.name,target_radius=a.skybox_radius,
+            textured=not a.untextured,tile_size=a.tile_size,
+            texture_budget=a.vram_texture_budget)
+        report.update(rom_sha256=fs.sha256,model=a.model)
+        a.out.mkdir(parents=True,exist_ok=True)
+        (a.out/f'{a.name}.h').write_text(header,encoding='utf8')
+        (a.out/f'{a.name}.c').write_text(source,encoding='utf8')
+        (a.out/f'{a.name}.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf8')
+        print(json.dumps(report,indent=2))
+        return
     clips=a.clip or ['idle=data/player/su_wait.bca','walk=data/player/su_walk.bca',
                      'run=data/player/su_run.bca','jump=data/player/su_jump.bca']
     named=[]
