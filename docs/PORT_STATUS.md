@@ -1,27 +1,22 @@
-# Port status — 2026-11-10
+# Port status — 2026-11-10 (modular converter / textured viewer)
 
-## Verified local work
+## Completed and locally checked
 
-- The repository has a Python converter in `tools/sm64ds_convert.py` and ROM-free + optional local-ROM tests in `tests/test_converter.py`.
-- Local user-supplied ASME Rev.00 input was identified and verified by SHA-256 in `docs/ROM_AUDIT.md`.
-- Local importer resolved `ARCHIVE/arc0.narc:131`, parsed **16** bones, **131** rigid unique vertex anchors and **246** native quad/degenerate-quad face records.
-- Four animation candidates were decoded: idle (120 frames), walk (30), run (30), jump (11), each with 16 joint tracks.
-- **11/11 Python tests passed** with `SM64DS_ROM` supplied locally. Without the ROM, the suite ran **7 passed + 4 skipped**.
-- The generated untextured C preview passed a **host C syntax-only check** against matching stub declarations. This is **not** a real LibSaturn link/ABI test.
+- Parser responsibilities split into 10 small Python modules under `tools/sm64ds_pipeline/`; CLI remains a thin orchestrator.
+- Nintendo DS source formats 1-7 (including critical compressed 4×4 format 5) decode to RGBA; per-face VDP1 indexed8 canonical textures share one RGB555 palette.
+- DS GX FIFO interpreter accepts known matrix and material-state operations, retains UVs and matrix-joint identities; unknown commands fail explicitly.
+- BMD weighted matrix parsing and up-to-three-influence inverse-rest anchors added, with synthetic tests. This USA ROM contains 0 weighted BMD matrices across 502 inspected models.
+- Animated per-joint BCA scale channels are sampled and emitted separately; Saturn runtime helper computes dynamic T*R*S world matrices for `sat_skin_update_mesh`, without altering LibSaturn's pose ABI.
+- `src/viewer.c` and root `CMakeLists.txt` wire generated private Mario C/H into the actual LibSaturn model, texture upload, skinning and canonical 3D scene API.
+- **17/17 Python tests passed with local ASME Rev.00 ROM.** 440 / 450 top-level source BMDs parsed. Mario: 16 joints, 131 rigid vertices, 246 faces, 208 texture tiles, 53,248 texture-pixel bytes, 4 candidate BCA clips.
+- Generated Mario C and scale runtime C passed host C11 syntax-only checks with equivalent LibSaturn declarations.
 
-## Not done
+## Still pending
 
-- No SH-2 toolchain compilation or link using installed LibSaturn.
-- No emulator boot, screenshot, pixel parity, VDP1 rendering or native performance measurement.
-- No source-texture, palette, per-face UV baking, weighted BMD matrices, KCL parity or gameplay logic.
-- BCA playback frequency assumed 30 Hz as a configurable importer setting; the original game's state timings have not yet been cross-checked.
-- No asset blobs are committed to the repository.
+- **No native SH-2 link or emulator/hardware boot yet**. The dev environment lacks the toolchain and installed LibSaturn. Viewer is source integration, not demonstrated rendering.
+- Texture UV and animation visual parity against the original DS and upstream PC oracle, head attachment and full material SRT/alpha/lighting correctness.
+- Ten 1-bone skyboxes with `scaleShift=13` need separate static background handling.
+- Scene collision / KCL/CLPS, Mario control/physics, real game loop and course content.
+- Full sound and audio synchronization, calibrated rate/frame budget, memory pressure under level load and stress cases.
 
-## Next blocking gates
-
-1. Connect generated `sat_model_asset_t` + `sat_skeleton_asset_t` + `sat_skin_asset_t` + `sat_skeleton_clip_t` to a **real LibSaturn scene** and run native API validation.
-2. Use source reference/harness for bone matrix comparison at fixed animation frames; correct any visual/pose divergence.
-3. Implement VDP1 indexed texture baking with transparent index handling and predictable texture-memory ownership, then move to runtime character rendering.
-4. Investigate KCL primitive tests and original player behavior after rendering is proven.
-
-Source/measurements are development evidence only, not an assertion that Mario is yet playable on Saturn.
+No copyrighted asset bytes were committed. Generated assets are local-only.
