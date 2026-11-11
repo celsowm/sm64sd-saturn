@@ -76,10 +76,11 @@ class Geometry:
         self.face_uvs.append(tuple(c.uv for c in corners))
         self.face_materials.append(material)
 
-    def decode(self,stream:bytes,map_slot,material:int)->None:
+    def decode(self,stream:bytes,map_slot,material:int, *, texture_matrix=None,
+               texture_generation:int=0)->None:
         pos=0;prim=-1;corners=[]
         vx=vy=vz=0;uv=(0.,0.);uv_current=False
-        mode=2;slot=0;local=identity();tex_mtx=identity()
+        mode=2;slot=0;local=identity();tex_mtx=texture_matrix or identity()
         saved={};stack=[]
         while pos<len(stream):
             word=field(stream,pos,'I');pos+=4
@@ -130,7 +131,7 @@ class Geometry:
                         else:local=mul(m,local)
                 elif op==0x22:
                     u=signed16(args[0])/16.;v=signed16(args[0]>>16)/16.
-                    if mode==3:
+                    if mode==3 or texture_generation==1:
                         u,v=(u*tex_mtx[0]+v*tex_mtx[4]+tex_mtx[12],
                              u*tex_mtx[1]+v*tex_mtx[5]+tex_mtx[13])
                     uv=(u,v);uv_current=True

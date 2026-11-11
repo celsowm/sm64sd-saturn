@@ -1,6 +1,18 @@
 # Super Mario 64 DS -> Sega Saturn (LibSaturn)
 
-Experimental, source-level port to a **stock Sega Saturn**, referencing [sm64ds-decomp](https://github.com/tangosdev/sm64ds-decomp) and using public [LibSaturn](https://github.com/celsowm/libsaturn) APIs. The repository contains **tools, tests and a scene viewer**, not Nintendo game data.
+Experimental, source-level port to a **stock Sega Saturn**, referencing [sm64ds-decomp](https://github.com/tangosdev/sm64ds-decomp) and using public [LibSaturn](https://github.com/celsowm/libsaturn) APIs. The repository contains tools, tests, a viewer and a castle grounds walking prototype. Nintendo game data stays local and ignored.
+
+## Playable castle grounds prototype
+
+```sh
+./build-castle.sh   # Uses the local private/sm64ds_usa.nds
+./play-castle.sh
+```
+
+D-pad moves, A jumps, B runs, L/R rotates the camera, C resets and Start
+pauses. The original exterior and KCL support a first free-roaming scene;
+doors, swimming, actors, missions and original DS player physics remain open.
+See [build, measurements and limitations](docs/PLAYABLE_CASTLE.md).
 
 ## Implemented: modular host pipeline and first real viewer source
 
@@ -23,7 +35,7 @@ Experimental, source-level port to a **stock Sega Saturn**, referencing [sm64ds-
 | `runtime/sm64ds_background.c` | Camera-centred static skybox, separate palette and safe scene admission |
 | `src/viewer.c` | Saturn model, indexed textures, animated skin, optional skybox, camera and telemetry |
 
-**Status:** 33/33 tests pass with the locally supplied ASME USA Rev.00 ROM. All **450/450** top-level BMDs and **52/52** nested NARC BMDs parse without exemptions; all ten previously missing skyboxes export as textured static C/H.  The generated Mario model has 16 joints, 131 rigid vertices, 246 VDP1 faces and 208 deduplicated indexed8 texture tiles (~52 KiB pixel payload). **This is not an emulator or hardware boot result.**
+**Status:** 42/42 tests pass with the locally supplied ASME USA Rev.00 ROM. All **450/450** top-level BMDs and **52/52** nested NARC BMDs parse without exemptions; all ten previously missing skyboxes export as textured static C/H.  The generated Mario model has 16 joints, 131 rigid vertices, 246 VDP1 faces and 208 deduplicated indexed8 texture tiles (~52 KiB pixel payload). The castle target has now booted in Ymir and Mednafen; see the playable prototype notes above.
 
 ## Build locally (ROM not distributed)
 
@@ -77,8 +89,14 @@ culling. No emulator picture parity is claimed. See
 
 The `--kind world-hlod` converter bridges the original outdoor BMD geometry, per-face UVs and materials to LibSaturn's shared `model_pipeline.world_hlod` QEM/`WLH1` pipeline without copying its simplifier. The converter keeps generated files private and rejects HLOD quality-gate failures. See [world HLOD integration](docs/WORLD_HLOD_INTEGRATION.md) for the CLI, verified real-ROM source counts, tests and remaining rendering/VRAM acceptance. **This is not yet a playable outdoor level.**
 
+With the local LibSaturn material-ownership and partition fixes, castle and
+garden now pass host package quality gates: eight cells each, 207,836 and
+102,292 WLH1 bytes respectively. The integration guide records the measured
+per-scene LOD targets; the original `160,64,24` defaults remain too small for
+these scenes. Textures and Saturn runtime rendering still need integration.
+
 See [converter technical details](docs/CONVERTER.md), [port plan](docs/PORT_PLAN.md), [ROM audit](docs/ROM_AUDIT.md), and [current status](docs/PORT_STATUS.md).
 
 ## Current boundaries
 
-This is a **viewer source and measured host asset pipeline**, not a completed playable Mario game. Hardware/SH-2 build and emulator image inspection still need to be run in an environment with the installed toolchain and SDK. Exact DS polygon translucency, lighting, material texture transforms, character head attachment, KCL parity, actor behavior and gameplay remain separate work. Copyrighted assets never enter public CI or commits.
+This is a **viewer source and measured host asset pipeline**, not a completed playable Mario game. The castle walking target builds for SH-2 and has emulator captures; physical hardware testing remains open. Exact DS polygon translucency, lighting, material texture transforms, character head attachment, KCL parity, actor behavior and gameplay remain separate work. Copyrighted assets never enter public CI or commits.

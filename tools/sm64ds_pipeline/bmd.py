@@ -1,9 +1,10 @@
 """BMD model: hierarchy, material assignment, DS textures and GX streams."""
 from __future__ import annotations
-from dataclasses import dataclass,field as dc_field
+from dataclasses import dataclass,field as dc_field,replace
+import math
 from .common import FormatError,field,region
 from .compression import lz77
-from .geometry import Geometry,Vertex,gx_params
+from .geometry import Geometry,Vertex,gx_params,identity
 from .textures import SourceTexture,decode_texture
 
 @dataclass(frozen=True)
@@ -95,17 +96,44 @@ def convert_bmd(blob:bytes)->Model:
     npal,ppal=field(data,0x1c,'II')
     nmat,pmat=field(data,0x24,'II')
     if max(ntex,npal,nmat)>4096:raise FormatError('impossible BMD material/texture count')
-    material_textures=[]
+    material_textures=[];material_matrices=[];material_generations=[]
     tex_cache={}
     for i in range(nmat):
         at=pmat+i*0x30;region(data,at,0x30)
         texid,palid=field(data,at+4,'II')
+        params=field(data,at+0x20,'I')
+        generation=params>>30
+        material_generations.append(generation)
+        matrix=list(identity())
+        material_matrices.append(matrix)
         if texid>=ntex or palid>=npal:
             material_textures.append(None);continue
         key=(texid,palid)
         if key not in tex_cache:
             tex_cache[key]=decode_texture(data,ptex+texid*0x14,ppal+palid*0x10)
-        material_textures.append(tex_cache[key])
+        texture=tex_cache[key]
+        # The engine ORs material TEXIMAGE_PARAM with the texture flags.
+        # Mario's eyes depend on mirrored S wrapping and a 2x S transform.
+        texture=replace(texture,
+            repeat_s=texture.repeat_s or bool(params&0x10000),
+            repeat_t=texture.repeat_t or bool(params&0x20000),
+            flip_s=texture.flip_s or bool(params&0x40000),
+            flip_t=texture.flip_t or bool(params&0x80000))
+        material_textures.append(texture)
+        if generation==1:
+            ss,st=field(data,at+0x0c,'ii')
+            rotation=field(data,at+0x14,'H')&0xfff
+            ts,tt=field(data,at+0x18,'ii')
+            sin=round(math.sin(rotation*2*math.pi/4096)*4096)
+            cos=round(math.cos(rotation*2*math.pi/4096)*4096)
+            s_sin=(ss*sin)>>12;s_cos=(ss*cos)>>12
+            t_sin=(st*sin)>>12;t_cos=(st*cos)>>12
+            w,h=texture.width,texture.height
+            # ModelComponents::func_02044b30 texture SRT/aspect correction.
+            matrix[0]=s_cos/4096;matrix[1]=(-t_sin*h/w)/4096
+            matrix[4]=(s_sin*w/h)/4096;matrix[5]=t_cos/4096
+            matrix[12]=(w*(ss-s_sin-s_cos)*8-w*((ss*ts)>>8))/4096
+            matrix[13]=(h*(t_sin-t_cos-st+0x2000)*8+h*((st*tt)>>8))/4096
 
     # The game's render traversal uses bone.materialIds[k] and
     # bone.displayListIds[k], not 'group index = material index'.
@@ -140,7 +168,9 @@ def convert_bmd(blob:bytes)->Model:
             for di in range(count):
                 _reserved,_ptr,length,offset=field(data,lists_at+di*0x10,'IIII')
                 if length&3:raise FormatError('unaligned GX display list')
-                geometry.decode(region(data,offset,length),resolve_slot,mat)
+                geometry.decode(region(data,offset,length),resolve_slot,mat,
+                    texture_matrix=material_matrices[mat],
+                    texture_generation=material_generations[mat])
     if not geometry.vertices or not geometry.faces or len(geometry.faces)>=65536:
         raise FormatError('BMD has empty or oversized geometry')
     return Model(bones,geometry.vertices,geometry.faces,shift,nmat,ntex,num_weighted,

@@ -1,5 +1,26 @@
 # Port status — 2026-11-10 (modular converter / textured viewer)
 
+## Current: playable castle grounds prototype
+
+The `sm64ds_castle` SH-2 target now builds a private bootable disc and supports
+walking/running, jumping/landing, wall/ceiling collision, camera orbit, pause
+and reset on the original exterior and independent KCL. The separate gameplay
+head is attached to body bone 15. **42/42 ROM-enabled host tests pass.**
+
+Ymir input replays and a full BIOS boot were captured. Direct Mednafen image
+inspection exposed partial VDP1 lists under automatic field swaps; explicit
+`SAT_VDP1_FRAME_ON_SUBMIT` fixed the missing Mario/HUD. A fresh Mednafen capture
+shows the corrected gameplay head and complete scene. The current SDK was
+rebuilt and installed before linking. Generated assets/captures remain ignored.
+
+This is an exploration prototype with roughly 8 draws/second in the initial
+full-detail Ymir routes. Original DS movement, CLPS behaviors, water/swimming,
+doors, actors, audio, missions, image parity and hardware acceptance remain
+open. High WRAM residency also needs reduction before expansion. See
+[playable castle build, controls and evidence](PLAYABLE_CASTLE.md).
+
+Earlier entries below describe prior milestones and their then-open gates.
+
 ## Completed and locally checked
 
 - Parser responsibilities split into 10 small Python modules under `tools/sm64ds_pipeline/`; CLI remains a thin orchestrator.
@@ -51,3 +72,25 @@ Next acceptance: install SH-2 compiler/LibSaturn, build the private disc,
 boot in Ymir, verify skybox image and pass ordering, compare against DS/PC
 reference, and capture actual `g_sm64ds_viewer_stats` measurements.
 See [BACKGROUND_RENDERING.md](BACKGROUND_RENDERING.md).
+
+## Outdoor HLOD host packages (2026-11-10)
+
+- Local ROM copied to ignored `private/sm64ds_usa.nds`; generated geometry,
+  reports and material manifests remain under ignored `private/world-hlod/`.
+- Fixed LibSaturn exact-duplicate welding and collapse remapping to retain
+  source material ownership. Fixed clipping to avoid orphan vertices from
+  rejected zero-area fragments, which falsely failed unsimplified garden
+  geometry's surface-error gate.
+- Castle passes aggressive quality gates with per-cell targets 512/384/256:
+  eight cells, 207,836 bytes, total LOD face counts 1,951/1,881/1,459.
+- Garden passes with targets 256/160/96: eight cells, 102,292 bytes, total
+  LOD face counts 955/895/623. Both retain 100% partition source triangle and
+  area coverage. Independent WLH1 binary read-back passed.
+- **33/33 SM64 tests pass with the ROM**, plus **44/44 LibSaturn simplifier,
+  quality and CLI tests** and **10/10 LibSaturn HLOD tests**, including the
+  new material and orphan-vertex regressions. Quality thresholds were kept.
+
+Next: post-simplification texture baking, bounded cell loading and scene
+submission, then native build and emulator image/telemetry acceptance.
+These host results do not establish runtime frame rate, image parity or
+VRAM residency. See [HLOD measurements](WORLD_HLOD_INTEGRATION.md).

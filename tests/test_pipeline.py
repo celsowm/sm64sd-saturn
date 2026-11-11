@@ -10,7 +10,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
 from sm64ds_pipeline.common import FormatError
 from sm64ds_pipeline import Bone,Model,Animation,Vertex
 from sm64ds_pipeline.bmd import _weighted,WeightedMatrix
-from sm64ds_pipeline.geometry import Geometry
+from sm64ds_pipeline.geometry import Geometry,identity
 from sm64ds_pipeline.skinning import build_layout
 from sm64ds_pipeline.textures import SourceTexture,decode_texture,bake_face,index_bakes
 from sm64ds_pipeline.emit import emit_model
@@ -29,6 +29,23 @@ def fifo(commands):
 
 
 class FormatTests(unittest.TestCase):
+    def test_material_texture_matrix_applies_outside_matrix_mode_texture(self):
+        # Material bind sets TEXGEN=TEXCOORD, then position mode is restored
+        # for the display list. That must not disable the material's SRT.
+        stream=fifo([(0x40,(0,)),(0x22,(16|32<<16,)),(0x23,(0,0)),
+                     (0x23,(4096,0)),(0x23,(0,4096)),(0x41,())])
+        matrix=list(identity());matrix[0]=2
+        geom=Geometry();geom.decode(stream,lambda k:k,0,
+            texture_matrix=matrix,texture_generation=1)
+        self.assertEqual(geom.face_uvs[0],((2.,2.),)*4)
+
+    def test_mirrored_texture_repeat_preserves_both_eyes(self):
+        tex=SourceTexture(8,8,tuple((x*32,0,0,255) for y in range(8) for x in range(8)),
+                          repeat_s=True,flip_s=True)
+        tile=bake_face(tex,((0,0),(16,0),(16,8),(0,8)),16)
+        self.assertEqual([p[0] for p in tile.rgba[:16]],
+                         [0,32,64,96,128,160,192,224,224,192,160,128,96,64,32,0])
+
     def test_gx_material_state_and_uv(self):
         stream=fifo([(0x30,(0x7fff,)),(0x40,(0,)),(0x22,(16|32<<16,)),
                      (0x23,(0,0)),(0x22,(32|32<<16,)),(0x23,(4096,0)),
@@ -102,6 +119,17 @@ class FormatTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('SM64DS_ROM'),'local ROM not supplied')
 class ActualRomTests(unittest.TestCase):
+    def test_mario_eye_material_scale_and_mirror(self):
+        from sm64ds_pipeline import Filesystem,convert_bmd
+        fs=Filesystem.from_file(Path(os.environ['SM64DS_ROM']))
+        head=convert_bmd(fs.read('ARCHIVE/arc0.narc:129'))
+        eye=head.material_textures[0]
+        self.assertEqual((eye.width,eye.height),(16,32))
+        self.assertTrue(eye.repeat_s and eye.repeat_t and eye.flip_s and eye.flip_t)
+        coords=[uv for mat,face in zip(head.face_materials,head.face_uvs) if mat==0 for uv in face]
+        self.assertEqual(min(uv[0] for uv in coords),-0.125)
+        self.assertEqual(max(uv[0] for uv in coords),32.125)
+
     def test_full_textured_mario(self):
         from sm64ds_pipeline import Filesystem,convert_bmd
         fs=Filesystem.from_file(Path(os.environ['SM64DS_ROM']))

@@ -69,8 +69,10 @@ def main(argv=None):
         (a.out/f'{a.name}.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf8')
         print(json.dumps(report,indent=2))
         return
-    clips=a.clip or ['idle=data/player/su_wait.bca','walk=data/player/su_walk.bca',
-                     'run=data/player/su_run.bca','jump=data/player/su_jump.bca']
+    # Normal Mario locomotion lives beside his body/head in arc0. The
+    # top-level su_* clips are a different animation set.
+    clips=a.clip or ['idle=ARCHIVE/arc0.narc:179','walk=ARCHIVE/arc0.narc:180',
+                     'run=ARCHIVE/arc0.narc:145','jump=ARCHIVE/arc0.narc:120']
     named=[]
     for item in clips:
         key,sep,path=item.partition('=')

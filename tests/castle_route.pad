@@ -1,0 +1,16 @@
+# Ymir display-field timeline: walk/run, jump, camera, pause and respawn.
+0 NONE
+90 UP+B
+150 UP+B+A
+165 UP+B
+240 NONE
+300 L
+350 NONE
+400 RIGHT+B
+500 NONE
+550 START
+575 NONE
+610 START
+635 NONE
+700 C
+735 NONE
