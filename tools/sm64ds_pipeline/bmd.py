@@ -1,6 +1,6 @@
 """BMD model: hierarchy, material assignment, DS textures and GX streams."""
 from __future__ import annotations
-from dataclasses import dataclass,field as dc_field,replace
+from dataclasses import dataclass,field as dc_field
 import math
 from .common import FormatError,field,region
 from .compression import lz77
@@ -33,6 +33,32 @@ class Model:
     face_materials:list[int]=dc_field(default_factory=list)
     material_textures:list[SourceTexture|None]=dc_field(default_factory=list)
     weighted:list[WeightedMatrix]=dc_field(default_factory=list)
+    face_provenance:list[tuple[int,int,int,int]]=dc_field(default_factory=list)
+    material_flags:list[int]=dc_field(default_factory=list)
+
+
+def _load_matrix_slots(slots, references, resolve):
+    if len(references)>len(slots):
+        raise FormatError('display list has more than 32 matrix slots')
+    for slot,ref in enumerate(references):
+        if ref!=0xff:
+            slots[slot]=resolve(ref)
+
+
+def _draw_schedule(data, bones_at, bone_count, group_count, material_flags):
+    """Return the engine's bone-record/material-list traversal in order."""
+    schedule=[]
+    for i in range(bone_count):
+        at=bones_at+i*0x40
+        count=field(data,at+0x30,'H')
+        mats=field(data,at+0x34,'I');groups=field(data,at+0x38,'I')
+        if count>4096:raise FormatError('malformed BMD bone material mapping')
+        for mat,group in zip(region(data,mats,count),region(data,groups,count)):
+            if mat>=len(material_flags) or group>=group_count:
+                raise FormatError('bone references invalid material/display group')
+            if not material_flags[mat]&0x80000000:
+                schedule.append((group,mat))
+    return schedule
 
 
 def _weighted(data:bytes,skin_at:int,num_weighted:int,nb:int)->list[WeightedMatrix]:
@@ -96,29 +122,25 @@ def convert_bmd(blob:bytes)->Model:
     npal,ppal=field(data,0x1c,'II')
     nmat,pmat=field(data,0x24,'II')
     if max(ntex,npal,nmat)>4096:raise FormatError('impossible BMD material/texture count')
-    material_textures=[];material_matrices=[];material_generations=[]
+    material_textures=[];material_matrices=[];material_generations=[];material_flags=[]
     tex_cache={}
     for i in range(nmat):
         at=pmat+i*0x30;region(data,at,0x30)
+        material_flags.append(field(data,at+0x24,'I'))
         texid,palid=field(data,at+4,'II')
         params=field(data,at+0x20,'I')
-        generation=params>>30
-        material_generations.append(generation)
         matrix=list(identity())
         material_matrices.append(matrix)
         if texid>=ntex or palid>=npal:
+            material_generations.append(params>>30)
             material_textures.append(None);continue
-        key=(texid,palid)
+        texflags=field(data,ptex+texid*0x14+0x10,'I')
+        generation=(params|texflags)>>30
+        material_generations.append(generation)
+        key=(texid,palid,params)
         if key not in tex_cache:
-            tex_cache[key]=decode_texture(data,ptex+texid*0x14,ppal+palid*0x10)
+            tex_cache[key]=decode_texture(data,ptex+texid*0x14,ppal+palid*0x10,material_flags=params)
         texture=tex_cache[key]
-        # The engine ORs material TEXIMAGE_PARAM with the texture flags.
-        # Mario's eyes depend on mirrored S wrapping and a 2x S transform.
-        texture=replace(texture,
-            repeat_s=texture.repeat_s or bool(params&0x10000),
-            repeat_t=texture.repeat_t or bool(params&0x20000),
-            flip_s=texture.flip_s or bool(params&0x40000),
-            flip_t=texture.flip_t or bool(params&0x80000))
         material_textures.append(texture)
         if generation==1:
             ss,st=field(data,at+0x0c,'ii')
@@ -137,20 +159,7 @@ def convert_bmd(blob:bytes)->Model:
 
     # The game's render traversal uses bone.materialIds[k] and
     # bone.displayListIds[k], not 'group index = material index'.
-    draw_groups:dict[int,list[int]]={}
-    for i in range(nb):
-        at=bones_at+i*0x40
-        count=field(data,at+0x30,'H')
-        mats=field(data,at+0x34,'I');groups=field(data,at+0x38,'I')
-        if count>4096:raise FormatError('malformed BMD bone material mapping')
-        if count:
-            mid_bytes=region(data,mats,count)
-            group_bytes=region(data,groups,count)
-            for mat,group in zip(mid_bytes,group_bytes):
-                if mat>=nmat or group>=group_count:
-                    raise FormatError('bone references invalid material/display group')
-                dest=draw_groups.setdefault(group,[])
-                if mat not in dest:dest.append(mat)
+    schedule=_draw_schedule(data,bones_at,nb,group_count,material_flags)
     geometry=Geometry()
     def resolve_slot(index:int)->int:
         # The DS MTX_RESTORE slot indexes the transformBoneMap (16-bit entries),
@@ -160,19 +169,28 @@ def convert_bmd(blob:bytes)->Model:
         if ref>=nb+num_weighted:
             raise FormatError(f'GX slot {index} resolves to invalid matrix {ref}')
         return ref
-    for group in range(group_count):
+    # Each part loads its own byte-indexed matrix table into GX slots.  A
+    # restore operand names a slot, not a transformBoneMap entry.  0xff
+    # leaves that hardware slot untouched across parts.
+    matrix_slots=[None]*32
+    for group,mat in schedule:
         at=groups_at+group*8
         count,lists_at=field(data,at,'II')
         if count>10000:raise FormatError('too many GX lists in BMD group')
-        for mat in draw_groups.get(group,[0]):
-            for di in range(count):
-                _reserved,_ptr,length,offset=field(data,lists_at+di*0x10,'IIII')
-                if length&3:raise FormatError('unaligned GX display list')
-                geometry.decode(region(data,offset,length),resolve_slot,mat,
-                    texture_matrix=material_matrices[mat],
-                    texture_generation=material_generations[mat])
+        for di in range(count):
+            slot_count,slot_ptr,length,offset=field(data,lists_at+di*0x10,'IIII')
+            _load_matrix_slots(matrix_slots,region(data,slot_ptr,slot_count),resolve_slot)
+            def resolve_part_slot(slot):
+                if slot>=len(matrix_slots) or matrix_slots[slot] is None:
+                    raise FormatError(f'GX restore of unloaded matrix slot {slot}')
+                return matrix_slots[slot]
+            if length&3:raise FormatError('unaligned GX display list')
+            geometry.decode(region(data,offset,length),resolve_part_slot,mat,
+                texture_matrix=material_matrices[mat],
+                texture_generation=material_generations[mat],source=(group,di,mat))
     if not geometry.vertices or not geometry.faces or len(geometry.faces)>=65536:
         raise FormatError('BMD has empty or oversized geometry')
     return Model(bones,geometry.vertices,geometry.faces,shift,nmat,ntex,num_weighted,
                  dict(geometry.gx_commands),geometry.face_uvs,
-                 geometry.face_materials,material_textures,weighted)
+                 geometry.face_materials,material_textures,weighted,geometry.face_provenance,
+                 material_flags)

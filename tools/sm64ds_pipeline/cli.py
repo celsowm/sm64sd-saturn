@@ -86,5 +86,10 @@ def main(argv=None):
     (a.out/f'{a.name}.h').write_text(header,encoding='utf8')
     (a.out/f'{a.name}.c').write_text(source,encoding='utf8')
     (a.out/f'{a.name}.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf8')
+    (a.out/f'{a.name}_face_provenance.json').write_text(json.dumps([
+        {'face':i,'group':group,'display_list':display_list,'material':material,
+         'primitive':primitive,'vertices':model.faces[i],'uv':model.face_uvs[i]}
+        for i,(group,display_list,material,primitive) in enumerate(model.face_provenance)
+    ],indent=2)+'\n',encoding='utf8')
     print(json.dumps(report,indent=2))
 

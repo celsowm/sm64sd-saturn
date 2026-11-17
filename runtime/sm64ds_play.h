@@ -32,3 +32,7 @@ void sm64ds_player_step(sm64ds_player_t *, const sm64ds_collision_t *,
                         int32_t dx, int32_t dz, uint8_t jump, uint8_t run);
 int32_t sm64ds_camera_fraction(const sm64ds_collision_t *,
                                const sat_vec3_t *from, const sat_vec3_t *to);
+/* Choose the first usable alternative, keeping the previous alternative until
+ * the requested direction has more clearance. Distances use 16.16 units. */
+uint8_t sm64ds_camera_select(const int32_t *clearance, uint8_t count,
+                             uint8_t previous, int32_t minimum, int32_t restore);

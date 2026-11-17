@@ -30,6 +30,10 @@ typedef struct sm64ds_background {
     uint8_t ready;
 } sm64ds_background_t;
 
+/* Average opaque indexed8 texels for the renderer's near-clip fallback.
+ * Generated models use palette index zero for transparency. */
+uint16_t sm64ds_texture_fallback(const sat_model_asset_t* model, uint16_t texture);
+
 /* Call after sat_init; background indexed8 bank 0 is reserved for Mario.
  * Upload once; all faces must be textured. */
 sat_result_t sm64ds_background_init(

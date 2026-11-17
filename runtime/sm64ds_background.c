@@ -2,6 +2,21 @@
 #include <limits.h>
 #include <stddef.h>
 
+uint16_t sm64ds_texture_fallback(const sat_model_asset_t* model, uint16_t texture) {
+    const sat_model_texture_asset_t* t = &model->textures[texture];
+    const uint16_t* palette = model->palettes_rgb555 + 256u*t->palette_slot;
+    uint32_t r=0,g=0,b=0,count=0;
+    for (uint32_t i=0;i<t->pixel_count;++i) {
+        const uint8_t index=t->pixels[i];
+        if (!index) continue;
+        const uint16_t color=palette[index];
+        r+=color&31u; g+=(color>>5)&31u; b+=(color>>10)&31u;
+        ++count;
+    }
+    /* RGB marker also makes opaque black distinct from "no fallback". */
+    return count ? (uint16_t)(0x8000u | (r/count) | ((g/count)<<5) | ((b/count)<<10)) : 0;
+}
+
 sat_result_t sm64ds_background_init(
     sm64ds_background_t* bg, const sat_model_asset_t* model,
     const sm64ds_background_buffers_t* buffers) {
@@ -31,6 +46,7 @@ sat_result_t sm64ds_background_init(
     if (st != SAT_OK) return st;
     for (uint16_t i=0; i<model->texture_count; ++i) {
         buffers->materials[i] = (sat_scene3d_material_t){0};
+        buffers->materials[i].rgb555 = sm64ds_texture_fallback(model,i);
         buffers->materials[i].kind = SAT_SCENE3D_INDEXED_TEXTURED;
         buffers->materials[i].texture = &buffers->textures[i];
         buffers->materials[i].color_calc_slot = SAT_INDEXED_SOLID_OPAQUE;

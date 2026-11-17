@@ -104,3 +104,16 @@ int32_t sm64ds_camera_fraction(const sm64ds_collision_t *w,
     }
     return best<ONE?(best>ONE/16?best-ONE/16:ONE/32):ONE;
 }
+
+uint8_t sm64ds_camera_select(const int32_t *clearance,uint8_t count,
+                             uint8_t previous,int32_t minimum,int32_t restore) {
+    if (!clearance || !count) return 0;
+    if (clearance[0]>=restore) return 0;
+    if (previous>0 && previous<count && clearance[previous]>=minimum) return previous;
+    uint8_t best=0;
+    for (uint8_t i=1;i<count;++i) {
+        if (clearance[i]>=minimum) return i;
+        if (clearance[i]>clearance[best]) best=i;
+    }
+    return best;
+}

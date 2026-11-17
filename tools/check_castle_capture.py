@@ -6,7 +6,7 @@ from pathlib import Path
 import struct
 import subprocess
 
-FIELDS='magic frames ticks jumps landings wall_hits resets x y z velocity_y camera_x camera_y camera_z grounded clip commands skipped faces paused'.split()
+FIELDS='magic frames ticks jumps landings wall_hits resets x y z velocity_y camera_x camera_y camera_z grounded clip commands skipped faces paused culled clipped fallback sky_clip_candidates castle_clip_candidates body_clip_candidates head_clip_candidates texture_arena_initial texture_arena_remaining texture_estimate requested_yaw actual_camera_yaw camera_clearance'.split()
 
 
 def check(elf, wram, nm, scenario):
@@ -18,7 +18,7 @@ def check(elf, wram, nm, scenario):
     data=wram.read_bytes()
     if len(data)!=1024*1024: raise ValueError('expected a complete High WRAM dump')
     offset=symbols['g_sm64ds_castle_stats']-0x06000000
-    report=dict(zip(FIELDS,struct.unpack_from('>20i',data,offset)))
+    report=dict(zip(FIELDS,struct.unpack_from(f'>{len(FIELDS)}i',data,offset)))
     panic=struct.unpack_from('>I',data,symbols['g_sat_last_panic']-0x06000000)[0]
     assert report['magic']==0x43415331 and report['frames']>0, 'no completed castle frame'
     assert panic!=0x50414e43, 'runtime panic recorded'

@@ -133,6 +133,7 @@ int main(void) {
     SAT_PANIC_IF_ERROR(sat_skin_validate_mesh(&mario_preview_skin,&g_mesh));
     SAT_PANIC_IF_ERROR(sat_model_upload_textures(&mario_preview_model,g_textures,T));
     for(uint16_t i=0;i<T;++i) {
+        g_materials[i].rgb555=sm64ds_texture_fallback(&mario_preview_model,i);
         g_materials[i].kind=SAT_SCENE3D_INDEXED_TEXTURED;
         g_materials[i].texture=&g_textures[i];
         g_materials[i].color_calc_slot=SAT_INDEXED_SOLID_OPAQUE;

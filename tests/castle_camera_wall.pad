@@ -1,0 +1,6 @@
+# Approach the entrance, stop, then orbit the camera against the door wall.
+0 NONE
+30 UP+B
+500 NONE
+520 L
+900 NONE

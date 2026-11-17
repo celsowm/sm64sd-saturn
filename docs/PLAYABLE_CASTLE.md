@@ -111,3 +111,49 @@ python3 tools/check_castle_capture.py \
 Upstream `tangosdev/sm64ds-decomp` reports 11,389/11,389 matched functions,
 99.9% linked and 96.2% PC-ported at fetched revision `3b57210e6d`. It is the
 reference for subsequent original movement and surface-behavior integration.
+
+## Near-camera surface repair
+
+Textured materials now supply an opaque average texture color to LibSaturn's
+near-plane fallback. Previously these materials left `rgb555` at zero, so
+textured faces that could not be drawn whole had no fallback and disappeared.
+Castle, body, head and sky materials now provide this color. Transparent index
+zero is excluded from the average; fully transparent tiles retain no fallback.
+Clipped surfaces use flat color until textured clipping is available.
+
+Validation: 42/42 ROM-enabled host tests and native castle disc build pass.
+The host fixture checks average color, transparent texels and material binding.
+This repair has not yet received a new emulator image comparison. Mario pose,
+source material colors/lighting, two-sided material handling and painter
+occlusion remain separate visual fidelity limitations.
+
+## Current visual repair build
+
+`build-castle.sh` uses LibSaturn's host plane splitter on a 64-unit grid
+near the spawn (48-unit XZ radius), with finer grids on validated foreground
+faces, including selected entrance walls split along height. The generated
+scene has 1,665 faces and 1,530 castle texture tiles; original KCL remains
+unchanged. This localized
+split improves the front-camera case where large ground triangles covered
+Mario's feet. The rest of the level remains unsplit and may still exhibit
+painter ordering artifacts. Partial-alpha castle materials use a 50% VDP1
+mesh approximation; exact DS alpha blending is not available on this path.
+HUD labels now have opaque backing for legibility.
+
+The 790-field Ymir controls route and 650-field wall route passed with this
+split and no sampled skipped faces or panic. The split build produced 72
+completed draws on the controls route, compared with 79 for the current
+unsplit build in a separate replay; these are route measurements, not a
+physical-hardware frame-rate claim. Fixed-camera and route captures are under
+`private/visual-repair-baseline/`. Further source pose, texture, clipping and
+camera coverage work remains open; see [the repair plan](VISUAL_REPAIR_PLAN.md).
+
+Castle 8×8 face tiles now use a 4×4 sample grid per output texel, averaging
+colors with alpha weighting before palette quantization. The source castle
+walls contain repeating brick textures; point sampling produced strong
+checker artifacts when those repeats collapsed into tiny face tiles. The
+filtered `castle-filtered.png` fixed-camera capture shows a smoother wall than
+`castle-source-order.png`; it remains low resolution and is not DS parity.
+Texture pixel residency is 82,816 bytes across 1,294 castle tiles. The current
+790-field Ymir route completed 72 draws with one jump, three landings, two
+resets, zero sampled skipped faces and no panic.

@@ -35,6 +35,16 @@ int main(void) {
     sat_vec3_t from={10*O,8*O,10*O},to={50*O,8*O,10*O};
     int32_t fraction=sm64ds_camera_fraction(&w,&from,&to);
     assert(fraction>0&&fraction<O/2);
+    int32_t clearance[]={2*O,12*O,24*O,28*O};
+    assert(sm64ds_camera_select(clearance,4,0,20*O,25*O)==2);
+    /* Keep the chosen side while it remains usable, even if an earlier
+     * candidate becomes available; restore the request with more space. */
+    clearance[1]=21*O;
+    assert(sm64ds_camera_select(clearance,4,2,20*O,25*O)==2);
+    clearance[0]=25*O;
+    assert(sm64ds_camera_select(clearance,4,2,20*O,25*O)==0);
+    clearance[0]=2*O;clearance[1]=3*O;clearance[2]=4*O;clearance[3]=9*O;
+    assert(sm64ds_camera_select(clearance,4,2,20*O,25*O)==3);
     p.feet=(sat_vec3_t){200*O,-161*O,200*O};
     sm64ds_player_step(&p,&w,0,0,0,0);
     assert(p.feet.x==p.spawn.x&&p.feet.y==p.spawn.y&&p.feet.z==p.spawn.z);

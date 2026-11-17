@@ -6,7 +6,10 @@ rom=${1:-$root/private/sm64ds_usa.nds}
 sdk=${LIBSATURN_PREFIX:-$root/../saturn-prefix-gc}
 source=${LIBSATURN_SOURCE:-$root/../lib-saturn}
 compiler=${LIBSATURN_TOOLCHAIN_ROOT:-$root/../saturn-tools/bin}
-python3 tools/prepare_castle.py --rom "$rom" --out private/castle
+python3 tools/prepare_castle.py --rom "$rom" --out private/castle \
+  --sdk-split-grid 64 --split-radius 48 --libsaturn-source "$source" \
+  --refine-manifest tools/castle_refine_faces.json --refine-grid 32 \
+  --tile-size 8 --texture-samples 4
 cmake -S . -B build/castle -G Ninja \
   "-DCMAKE_TOOLCHAIN_FILE=$source/cmake/toolchains/sh2eb-elf.cmake" \
   "-DLIBSATURN_TOOLCHAIN_ROOT=$compiler" "-DCMAKE_PREFIX_PATH=$sdk" \

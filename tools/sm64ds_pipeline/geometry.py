@@ -61,6 +61,7 @@ class Geometry:
     faces:list[tuple[int,int,int,int]]=dc_field(default_factory=list)
     face_uvs:list[tuple[tuple[float,float],...]]=dc_field(default_factory=list)
     face_materials:list[int]=dc_field(default_factory=list)
+    face_provenance:list[tuple[int,int,int,int]]=dc_field(default_factory=list)
     gx_commands:Counter=dc_field(default_factory=Counter)
     _intern:dict=dc_field(default_factory=dict)
 
@@ -75,9 +76,11 @@ class Geometry:
         self.faces.append(tuple(c.vertex for c in corners))
         self.face_uvs.append(tuple(c.uv for c in corners))
         self.face_materials.append(material)
+        self.face_provenance.append((*self._source,self._primitive))
 
     def decode(self,stream:bytes,map_slot,material:int, *, texture_matrix=None,
-               texture_generation:int=0)->None:
+               texture_generation:int=0, source:tuple[int,int,int]=(-1,-1,-1))->None:
+        self._source=source
         pos=0;prim=-1;corners=[]
         vx=vy=vz=0;uv=(0.,0.);uv_current=False
         mode=2;slot=0;local=identity();tex_mtx=texture_matrix or identity()
@@ -137,7 +140,7 @@ class Geometry:
                     uv=(u,v);uv_current=True
                 elif op==0x40:
                     if prim>=0:raise FormatError('nested BEGIN_VTXS')
-                    prim=args[0]&3;corners=[]
+                    prim=args[0]&3;self._primitive=prim;corners=[]
                 elif op==0x41:
                     if prim<0:raise FormatError('END_VTXS without BEGIN')
                     if prim in (0,1) and corners:raise FormatError('incomplete triangle/quad')

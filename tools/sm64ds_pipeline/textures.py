@@ -52,9 +52,11 @@ def blend555(a: int, b: int, wa: int, wb: int) -> int:
            (((((a >> 10) & 31) * wa + ((b >> 10) & 31) * wb) // 8) << 10)
 
 
-def decode_texture(data: bytes, tex_record: int, pal_record: int) -> SourceTexture:
+def decode_texture(data: bytes, tex_record: int, pal_record: int, *, material_flags: int=0) -> SourceTexture:
     tdata, tsize = field(data, tex_record + 4, 'II')
-    flags = field(data, tex_record + 0x10, 'I')
+    # The game ORs TEXIMAGE_PARAM from the material and texture record.
+    # Transparency, wrapping, size and format must all use the same state.
+    flags = field(data, tex_record + 0x10, 'I') | material_flags
     pdata, psize = field(data, pal_record + 4, 'II')
     fmt = (flags >> 26) & 7
     width, height = 8 << ((flags >> 20) & 7), 8 << ((flags >> 23) & 7)
@@ -134,35 +136,46 @@ def _wrap(v: int, n: int, repeat: bool, flip: bool) -> int:
     return n - 1 - out if flip and (cell & 1) else out
 
 
-def bake_face(tex: SourceTexture, uv: tuple[tuple[float,float],...], size: int=16) -> BakedTexture:
+def bake_face(tex: SourceTexture, uv: tuple[tuple[float,float],...], size: int=16, *, samples: int=1) -> BakedTexture:
     """Bake a canonical VDP1 quad: A top-left, B top-right, C bottom-right, D bottom-left."""
-    if len(uv) != 4 or not 8 <= size <= 128 or size & 7:
+    if len(uv) != 4 or not 8 <= size <= 128 or size & 7 or samples not in (1,2,4):
         raise FormatError('VDP1 face bake needs 4 UVs and a width multiple of eight')
     rgba=[]
     for y in range(size):
-        t = (y + .5) / size
         for x in range(size):
-            s = (x + .5) / size
-            u = ((1-s)*(1-t)*uv[0][0] + s*(1-t)*uv[1][0] + s*t*uv[2][0] + (1-s)*t*uv[3][0])
-            v = ((1-s)*(1-t)*uv[0][1] + s*(1-t)*uv[1][1] + s*t*uv[2][1] + (1-s)*t*uv[3][1])
-            px = _wrap(int(u//1),tex.width,tex.repeat_s,tex.flip_s)
-            py = _wrap(int(v//1),tex.height,tex.repeat_t,tex.flip_t)
-            rgba.append(tex.pixels[py*tex.width+px])
+            accum=[0,0,0];alpha=0
+            for sy in range(samples):
+                t=(y+(sy+.5)/samples)/size
+                for sx in range(samples):
+                    s=(x+(sx+.5)/samples)/size
+                    u = ((1-s)*(1-t)*uv[0][0] + s*(1-t)*uv[1][0] + s*t*uv[2][0] + (1-s)*t*uv[3][0])
+                    v = ((1-s)*(1-t)*uv[0][1] + s*(1-t)*uv[1][1] + s*t*uv[2][1] + (1-s)*t*uv[3][1])
+                    px = _wrap(int(u//1),tex.width,tex.repeat_s,tex.flip_s)
+                    py = _wrap(int(v//1),tex.height,tex.repeat_t,tex.flip_t)
+                    color=tex.pixels[py*tex.width+px];alpha+=color[3]
+                    for k in range(3):accum[k]+=color[k]*color[3]
+            rgba.append(tuple((c+alpha//2)//alpha if alpha else 0 for c in accum)+
+                        ((alpha+samples*samples//2)//(samples*samples),))
     return BakedTexture(size,size,tuple(rgba))
 
 
-def index_bakes(bakes: list[BakedTexture]) -> tuple[list[IndexedTexture], tuple[int,...], list[int]]:
+def index_bakes(bakes: list[BakedTexture], *, reference_bakes: list[BakedTexture] | None=None) -> tuple[list[IndexedTexture], tuple[int,...], list[int]]:
     """One shared 256-color RGB555 palette. Index 0 is transparent.
 
     Frequency-based deterministic palette + nearest 5-bit color mapping. No
     hidden dependence on Pillow or a proprietary color table.
     """
     counts: Counter[int] = Counter()
-    for tile in bakes:
+    # Optionally choose the palette from a fixed reference set. Mixed-size
+    # face bakes otherwise give larger tiles disproportionate palette weight.
+    for tile in bakes if reference_bakes is None else reference_bakes:
         for p in tile.rgba:
             if p[3] >= 128:
                 counts[rgba_to_rgb555(p)] += 1
     selected = [v for v,_ in sorted(counts.items(),key=lambda x:(-x[1],x[0]))[:255]]
+    # An all-transparent reference cannot represent opaque output pixels.
+    if not selected and any(p[3]>=128 for tile in bakes for p in tile.rgba):
+        raise FormatError('transparent reference palette cannot represent opaque bakes')
     selected.sort()
     palette = [0] + selected + [0] * (255-len(selected))
     mapping = {color:i+1 for i,color in enumerate(selected)}

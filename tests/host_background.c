@@ -55,7 +55,7 @@ static const sat_vec3_t verts[]={{-100*65536,0,-100*65536},{100*65536,0,-100*655
                                   {100*65536,0,100*65536},{-100*65536,0,100*65536}};
 static const uint16_t indices[]={0,1,2,3};
 static const uint16_t materials[]={0};
-static const uint16_t palette[]={31,0};
+static const uint16_t palette[256]={0,31};
 static const uint8_t pixels[]={1,1,1,1,1,1,1,1};
 static const sat_model_texture_asset_t tex_assets[]={{pixels,8,1,0,0,8}};
 static sat_model_asset_t model={
@@ -69,6 +69,14 @@ int main(void) {
     sat_vdp1_texture_t t[1]={0};sat_scene3d_material_t mat[1]={0};
     uint16_t face[1]={65535};sm64ds_background_t bg={0};
     sm64ds_background_buffers_t buf={v,idx,t,mat,face,4,1,1};
+    const uint8_t mixed_pixels[]={0,1,2,0};
+    const uint16_t mixed_palette[256]={0,31,31<<5};
+    sat_model_texture_asset_t mixed_texture={mixed_pixels, 8, 1, 0, 0, 4};
+    sat_model_asset_t mixed=model;
+    mixed.textures=&mixed_texture; mixed.palettes_rgb555=mixed_palette;
+    assert(sm64ds_texture_fallback(&mixed,0)==(0x8000 | 15 | (15<<5)));
+    mixed_texture.pixel_count=1;
+    assert(sm64ds_texture_fallback(&mixed,0)==0);
     assert(SM64DS_BACKGROUND_PASS<SM64DS_ACTOR_PASS);
     model.palette_base=0;
     assert(sm64ds_background_init(&bg,&model,&buf)==SAT_ERR_INVALID_ARG && !uploads);
@@ -76,6 +84,7 @@ int main(void) {
     assert(sm64ds_background_init(&bg,&model,&buf)==SAT_ERR_CAPACITY && !uploads);
     buf.face_capacity=1;
     assert(sm64ds_background_init(&bg,&model,&buf)==SAT_OK && uploads==1);
+    assert(mat[0].rgb555==0x801f);
     assert(face[0]==0 && t[0].valid && !memcmp(v,verts,sizeof(verts)));
     assert(!memcmp(idx,indices,sizeof(indices)));
     sat_projected_vertex_t projected[4];sat_vec3_t world_scratch[4];
