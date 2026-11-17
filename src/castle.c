@@ -81,6 +81,11 @@ static uint8_t camera_choice=0;
 static const int16_t camera_offsets[]={0,45,-45,90,-90,135,-135,180};
 static uint16_t clip=0;
 static int32_t anim_time=0;
+/* Minimum camera-target distance below which the camera is not moved,
+ * preventing the reverse-door view from backing the camera into Mario. */
+static sat_vec3_t previous_camera_eye;
+static int32_t previous_camera_clearance=0;
+static const int32_t camera_safe_min=12*ONE;
 
 /* Stable debugger telemetry: all values are captured from real frames. */
 volatile struct {
@@ -137,9 +142,20 @@ static void update_camera(void) {
     camera_yaw=(yaw+camera_offsets[camera_choice]+360)%360;
     const sat_vec3_t desired=candidates[camera_choice];
     const int32_t t=fractions[camera_choice];
-    camera.eye=(sat_vec3_t){camera.target.x+sat_fx16_mul(desired.x-camera.target.x,t),
-        camera.target.y+sat_fx16_mul(desired.y-camera.target.y,t),
-        camera.target.z+sat_fx16_mul(desired.z-camera.target.z,t)};
+    /* If no candidate clears the safe minimum, hold the previous camera
+     * position rather than backing into Mario. */
+    if (clearance[camera_choice]>=camera_safe_min) {
+        camera.eye=(sat_vec3_t){camera.target.x+sat_fx16_mul(desired.x-camera.target.x,t),
+            camera.target.y+sat_fx16_mul(desired.y-camera.target.y,t),
+            camera.target.z+sat_fx16_mul(desired.z-camera.target.z,t)};
+        previous_camera_eye=camera.eye;
+        previous_camera_clearance=clearance[camera_choice];
+    } else {
+        camera.eye=previous_camera_eye;
+        g_sm64ds_castle_stats.camera_clearance=previous_camera_clearance;
+        SAT_PANIC_IF_ERROR(sat_camera3d_update(&camera));
+        return;
+    }
     g_sm64ds_castle_stats.requested_yaw=yaw;
     g_sm64ds_castle_stats.actual_camera_yaw=camera_yaw;
     g_sm64ds_castle_stats.camera_clearance=clearance[camera_choice];
