@@ -23,6 +23,7 @@ def main():
     p.add_argument('--refine-grid',type=float,default=0)
     p.add_argument('--refine-override',action='append',default=[],metavar='FACE=GRID')
     p.add_argument('--refine-manifest',type=Path)
+    p.add_argument('--pack-split-quads',action='store_true')
     a=p.parse_args();fs=Filesystem.from_file(a.rom)
     model=convert_bmd(fs.read('data/stage/main_castle/main_castle_all.bmd'))
     vertices=[tuple(c*(1<<model.scale_shift)*64/4096 for c in (v.x,v.y,v.z)) for v in model.vertices]
@@ -39,7 +40,8 @@ def main():
             if 'axes' in entry:axes[i]=entry['axes']
     pts,faces,uvs,mats,origin=split_nearby(vertices,model.faces,model.face_uvs,model.face_materials,
         a.libsaturn_source,center=(0,256),radius=a.radius,cell_size=a.grid,
-        refine_faces=a.refine_face,refine_cell_size=a.refine_grid,refine_grids=overrides,refine_axes=axes)
+        refine_faces=a.refine_face,refine_cell_size=a.refine_grid,refine_grids=overrides,refine_axes=axes,
+        pack_quads=a.pack_split_quads)
     source_area=[]
     for face in model.faces:
         p0,p1,p2,p3=[vertices[i] for i in face]

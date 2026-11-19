@@ -22,6 +22,7 @@ typedef struct {
 typedef struct { uint16_t vertex_count,face_count; sat_vec3_t *vertices; uint16_t *indices; } sat_mesh_t;
 typedef struct { int valid; } sat_vdp1_texture_t;
 #define SAT_MESH_TEXTURE_NONE 65535u
+#define SAT_MODEL_TEXTURE_LUT4 0x8000u
 sat_result_t sat_model_validate(const sat_model_asset_t*);
 sat_result_t sat_model_compute_bounds(const sat_model_asset_t*,sat_vec3_t*,sat_vec3_t*);
 sat_result_t sat_mesh_init(sat_mesh_t*,sat_vec3_t*,uint16_t,uint16_t*,uint16_t);

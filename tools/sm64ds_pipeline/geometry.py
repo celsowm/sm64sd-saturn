@@ -22,6 +22,7 @@ class Vertex:
 class Corner:
     vertex: int
     uv: tuple[float,float]
+    color: tuple[int,int,int]=(31,31,31)
 
 PARAM_COUNTS = {0x00:0,0x10:1,0x11:0,0x12:1,0x13:1,0x14:1,0x15:0,
                 0x16:16,0x17:12,0x18:16,0x19:12,0x1A:9,0x1B:3,0x1C:3,
@@ -60,29 +61,32 @@ class Geometry:
     vertices:list[Vertex]=dc_field(default_factory=list)
     faces:list[tuple[int,int,int,int]]=dc_field(default_factory=list)
     face_uvs:list[tuple[tuple[float,float],...]]=dc_field(default_factory=list)
+    face_colors:list[tuple[tuple[int,int,int],...]]=dc_field(default_factory=list)
     face_materials:list[int]=dc_field(default_factory=list)
     face_provenance:list[tuple[int,int,int,int]]=dc_field(default_factory=list)
     gx_commands:Counter=dc_field(default_factory=Counter)
     _intern:dict=dc_field(default_factory=dict)
 
-    def _vertex(self,xyz,joint,uv)->Corner:
+    def _vertex(self,xyz,joint,uv,color=(31,31,31))->Corner:
         vx=Vertex(*xyz,joint)
         if vx not in self._intern:
             if len(self.vertices)>=65535:raise FormatError('more than 65535 unique model vertices')
             self._intern[vx]=len(self.vertices);self.vertices.append(vx)
-        return Corner(self._intern[vx],uv)
+        return Corner(self._intern[vx],uv,color)
 
     def _face(self,corners,material):
         self.faces.append(tuple(c.vertex for c in corners))
         self.face_uvs.append(tuple(c.uv for c in corners))
+        self.face_colors.append(tuple(c.color for c in corners))
         self.face_materials.append(material)
         self.face_provenance.append((*self._source,self._primitive))
 
     def decode(self,stream:bytes,map_slot,material:int, *, texture_matrix=None,
-               texture_generation:int=0, source:tuple[int,int,int]=(-1,-1,-1))->None:
+               texture_generation:int=0, source:tuple[int,int,int]=(-1,-1,-1),
+               initial_color:tuple[int,int,int]=(31,31,31))->None:
         self._source=source
         pos=0;prim=-1;corners=[]
-        vx=vy=vz=0;uv=(0.,0.);uv_current=False
+        vx=vy=vz=0;uv=(0.,0.);uv_current=False;col=initial_color
         mode=2;slot=0;local=identity();tex_mtx=texture_matrix or identity()
         saved={};stack=[]
         while pos<len(stream):
@@ -132,6 +136,13 @@ class Geometry:
                             if slot!=map_slot(0):raise FormatError('absolute GX MTX_LOAD over a joint')
                             local=m
                         else:local=mul(m,local)
+                elif op==0x20:
+                    c=args[0]&0x7fff
+                    col=(c&31,(c>>5)&31,(c>>10)&31)
+                elif op==0x30:
+                    if args[0]&0x8000:
+                        c=args[0]&0x7fff
+                        col=(c&31,(c>>5)&31,(c>>10)&31)
                 elif op==0x22:
                     u=signed16(args[0])/16.;v=signed16(args[0]>>16)/16.
                     if mode==3 or texture_generation==1:
@@ -163,7 +174,7 @@ class Geometry:
                               for i in range(3))
                     if not all(-32768<=v<=32767 for v in xyz):
                         raise FormatError('GX local matrix moved vertex beyond signed16, needs rescale')
-                    co=self._vertex(xyz,slot,uv)
+                    co=self._vertex(xyz,slot,uv,col)
                     corners.append(co)
                     k=len(corners)
                     if prim==0 and k==3:

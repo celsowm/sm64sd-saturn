@@ -4,10 +4,15 @@
 
 uint16_t sm64ds_texture_fallback(const sat_model_asset_t* model, uint16_t texture) {
     const sat_model_texture_asset_t* t = &model->textures[texture];
-    const uint16_t* palette = model->palettes_rgb555 + 256u*t->palette_slot;
+    const int lut4 = (t->flags & SAT_MODEL_TEXTURE_LUT4) != 0u;
+    const uint16_t* palette = lut4
+        ? (model->luts_rgb555 + 16u*t->palette_slot)
+        : (model->palettes_rgb555 + 256u*t->palette_slot);
     uint32_t r=0,g=0,b=0,count=0;
     for (uint32_t i=0;i<t->pixel_count;++i) {
-        const uint8_t index=t->pixels[i];
+        const uint8_t index = lut4
+            ? (uint8_t)((i & 1u) ? (t->pixels[i >> 1] & 0x0fu) : (t->pixels[i >> 1] >> 4))
+            : t->pixels[i];
         if (!index) continue;
         const uint16_t color=palette[index];
         r+=color&31u; g+=(color>>5)&31u; b+=(color>>10)&31u;
@@ -25,8 +30,9 @@ sat_result_t sm64ds_background_init(
         return SAT_ERR_INVALID_ARG;
     const sat_result_t valid = sat_model_validate(model);
     if (valid != SAT_OK) return valid;
-    if (model->texture_count == 0 || model->palette_count == 0 ||
-        model->palette_base == 0) return SAT_ERR_INVALID_ARG;
+    if (model->texture_count == 0) return SAT_ERR_INVALID_ARG;
+    if (model->palette_count == 0 && model->lut_count == 0) return SAT_ERR_INVALID_ARG;
+    if (model->palette_count > 0 && model->palette_base == 0) return SAT_ERR_INVALID_ARG;
     if (buffers->vertex_capacity < model->vertex_count ||
         buffers->face_capacity < model->face_count ||
         buffers->texture_capacity < model->texture_count) return SAT_ERR_CAPACITY;

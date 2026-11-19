@@ -26,6 +26,9 @@ def main(argv=None):
     parser.add_argument('--rate-den',type=int,default=1,help='Clip-rate denominator')
     parser.add_argument('--untextured',action='store_true',help='Emit rig-only geometry')
     parser.add_argument('--tile-size',type=int,default=16,choices=[8,16,24,32,48,64],help='Baked VDP1 face texture width/height')
+    parser.add_argument('--lut4',action='store_true',help='Emit 4-bit VDP1 LUT4 textures with per-group 16-color LUTs')
+    parser.add_argument('--adaptive-size',action='store_true',help='Size actor/head tiles adaptively to their source UV spans')
+    parser.add_argument('--subdivide-sky',action='store_true',help='Merge skybox quads and subdivide oversized sky panels')
     parser.add_argument('--vram-texture-budget',type=int,default=262144,help='Max bytes for baked VDP1 pixels')
     parser.add_argument('--libsaturn-source',type=Path,default=None,
                         help='Local LibSaturn checkout (required for world-hlod; no download)')
@@ -61,7 +64,8 @@ def main(argv=None):
         header,source,report=emit_skybox(
             model,a.name,target_radius=a.skybox_radius,
             textured=not a.untextured,tile_size=a.tile_size,
-            texture_budget=a.vram_texture_budget)
+            texture_budget=a.vram_texture_budget,
+            lut4=a.lut4,adaptive_size=a.adaptive_size,subdivide_sky=a.subdivide_sky)
         report.update(rom_sha256=fs.sha256,model=a.model)
         a.out.mkdir(parents=True,exist_ok=True)
         (a.out/f'{a.name}.h').write_text(header,encoding='utf8')
@@ -80,7 +84,8 @@ def main(argv=None):
             parser.error('clip must be name=nitrofs/path')
         named.append((key,Animation(fs.read(path),len(model.bones))))
     header,source,report=emit_model(model,named,a.name,a.rate_num,a.rate_den,
-        textured=not a.untextured,tile_size=a.tile_size,texture_budget=a.vram_texture_budget)
+        textured=not a.untextured,tile_size=a.tile_size,texture_budget=a.vram_texture_budget,
+        lut4=a.lut4,adaptive_size=a.adaptive_size)
     report.update(rom_sha256=fs.sha256, model=a.model, source_clips={x.split("=",1)[0]:x.split("=",1)[1] for x in clips})
     a.out.mkdir(parents=True,exist_ok=True)
     (a.out/f'{a.name}.h').write_text(header,encoding='utf8')

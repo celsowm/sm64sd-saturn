@@ -27,6 +27,14 @@ typedef struct {
  * Original KCL is retained; DS player state/CLPS behavior is not emulated. */
 int sm64ds_floor(const sm64ds_collision_t *, int32_t x, int32_t z,
                  int32_t ceiling, int32_t *height);
+/* As above, also returns the normal of the selected highest floor. */
+int sm64ds_floor_normal(const sm64ds_collision_t *, int32_t x, int32_t z,
+                        int32_t ceiling, int32_t *height, sat_vec3_t *normal);
+/* Upward translation needed to keep transformed body vertices above a floor
+ * plane. The caller decides whether that plane is appropriate for the pose. */
+int32_t sm64ds_ground_pose_lift(const sat_vec3_t *vertices,uint16_t count,
+                                 const sat_mat4_t *world,const sat_vec3_t *point,
+                                 const sat_vec3_t *normal);
 void sm64ds_player_reset(sm64ds_player_t *);
 void sm64ds_player_step(sm64ds_player_t *, const sm64ds_collision_t *,
                         int32_t dx, int32_t dz, uint8_t jump, uint8_t run);

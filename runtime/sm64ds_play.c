@@ -23,8 +23,8 @@ static int cell(const sm64ds_collision_t *w,int32_t x,int32_t z) {
     a/=32*ONE;b/=32*ONE;
     return a<w->nx&&b<w->nz ? b*w->nx+a : -1;
 }
-int sm64ds_floor(const sm64ds_collision_t *w,int32_t x,int32_t z,
-                 int32_t ceiling,int32_t *height) {
+static int floor_query(const sm64ds_collision_t *w,int32_t x,int32_t z,
+                       int32_t ceiling,int32_t *height,sat_vec3_t *normal) {
     int bin=cell(w,x,z),found=0;
     int32_t best=INT32_MIN;
     if(bin<0)return 0;
@@ -34,10 +34,38 @@ int sm64ds_floor(const sm64ds_collision_t *w,int32_t x,int32_t z,
         int32_t y=p->origin.y-(int32_t)(((int64_t)(x-p->origin.x)*p->normal.x+
                     (int64_t)(z-p->origin.z)*p->normal.z)/p->normal.y);
         if(y>ceiling||y<=best)continue;
-        if(inside(p,(sat_vec3_t){x,y,z},ONE/32)) {best=y;found=1;}
+        if(inside(p,(sat_vec3_t){x,y,z},ONE/32)) {
+            best=y;found=1;if(normal)*normal=p->normal;
+        }
     }
     if(found)*height=best;
     return found;
+}
+int sm64ds_floor(const sm64ds_collision_t *w,int32_t x,int32_t z,
+                 int32_t ceiling,int32_t *height) {
+    return floor_query(w,x,z,ceiling,height,0);
+}
+int sm64ds_floor_normal(const sm64ds_collision_t *w,int32_t x,int32_t z,
+                        int32_t ceiling,int32_t *height,sat_vec3_t *normal) {
+    if(!normal) return 0;
+    return floor_query(w,x,z,ceiling,height,normal);
+}
+int32_t sm64ds_ground_pose_lift(const sat_vec3_t *vertices,uint16_t count,
+                                const sat_mat4_t *world,const sat_vec3_t *point,
+                                const sat_vec3_t *normal) {
+    if(!vertices || !world || !point || !normal || normal->y<=0) return 0;
+    int64_t lowest=0;
+    for(uint16_t i=0;i<count;++i) {
+        const sat_vec3_t *v=&vertices[i];
+        int64_t x=((int64_t)world->m[0]*v->x+(int64_t)world->m[1]*v->y+(int64_t)world->m[2]*v->z)/ONE+world->m[3];
+        int64_t y=((int64_t)world->m[4]*v->x+(int64_t)world->m[5]*v->y+(int64_t)world->m[6]*v->z)/ONE+world->m[7];
+        int64_t z=((int64_t)world->m[8]*v->x+(int64_t)world->m[9]*v->y+(int64_t)world->m[10]*v->z)/ONE+world->m[11];
+        int64_t signed_height=(x-point->x)*normal->x+(y-point->y)*normal->y+(z-point->z)*normal->z;
+        if(signed_height<lowest) lowest=signed_height;
+    }
+    if(!lowest) return 0;
+    int64_t lift=(-lowest+normal->y-1)/normal->y+ONE/32;
+    return lift>INT32_MAX?INT32_MAX:(int32_t)lift;
 }
 void sm64ds_player_reset(sm64ds_player_t *p) {
     p->feet=p->spawn;p->velocity_y=0;p->grounded=0;p->moving=0;p->running=0;++p->resets;

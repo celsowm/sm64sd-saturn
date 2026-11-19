@@ -6,7 +6,7 @@ from pathlib import Path
 import struct
 import subprocess
 
-FIELDS='magic frames ticks jumps landings wall_hits resets x y z velocity_y camera_x camera_y camera_z grounded clip commands skipped faces paused culled clipped fallback sky_clip_candidates castle_clip_candidates body_clip_candidates head_clip_candidates texture_arena_initial texture_arena_remaining texture_estimate requested_yaw actual_camera_yaw camera_clearance'.split()
+FIELDS='magic frames ticks jumps landings wall_hits resets x y z velocity_y camera_x camera_y camera_z target_x target_y target_z grounded clip commands skipped faces paused culled clipped fallback sky_clip_candidates castle_clip_candidates body_clip_candidates head_clip_candidates texture_arena_initial texture_arena_remaining texture_estimate requested_yaw actual_camera_yaw camera_clearance mario_facing camera_fov_y'.split()
 
 
 def check(elf, wram, nm, scenario):
@@ -31,6 +31,11 @@ def check(elf, wram, nm, scenario):
         assert report['paused']==0, 'resume failed'
     if scenario=='wall':
         assert report['wall_hits']>0 and report['grounded']==1, 'wall contact route failed'
+    # Add a second, script-friendly view without losing the raw 16.16 values.
+    for name in ('x','y','z','velocity_y','camera_x','camera_y','camera_z',
+                 'target_x','target_y','target_z','mario_facing','camera_fov_y',
+                 'camera_clearance'):
+        report[name+'_units']=report[name]/65536
     report.update(scenario=scenario,panic=False)
     return report
 

@@ -374,5 +374,441 @@
       2
     ],
     "axes": "xyz"
+  },
+  {
+    "face": 815,
+    "vertices": [
+      626,
+      625,
+      691,
+      691
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 816,
+    "vertices": [
+      625,
+      692,
+      691,
+      691
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 817,
+    "vertices": [
+      625,
+      693,
+      692,
+      692
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 819,
+    "vertices": [
+      626,
+      694,
+      6,
+      6
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 820,
+    "vertices": [
+      626,
+      691,
+      694,
+      694
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 856,
+    "vertices": [
+      717,
+      718,
+      684,
+      684
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 857,
+    "vertices": [
+      718,
+      682,
+      684,
+      684
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 859,
+    "vertices": [
+      682,
+      718,
+      719,
+      719
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 860,
+    "vertices": [
+      713,
+      714,
+      720,
+      720
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 861,
+    "vertices": [
+      714,
+      721,
+      720,
+      720
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 982,
+    "vertices": [
+      763,
+      714,
+      764,
+      764
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 985,
+    "vertices": [
+      491,
+      679,
+      764,
+      764
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 987,
+    "vertices": [
+      719,
+      670,
+      490,
+      490
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 988,
+    "vertices": [
+      764,
+      762,
+      487,
+      487
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 990,
+    "vertices": [
+      719,
+      462,
+      705,
+      705
+    ],
+    "provenance": [
+      1,
+      0,
+      15,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 511,
+    "vertices": [
+      150,
+      117,
+      442,
+      442
+    ],
+    "provenance": [
+      21,
+      0,
+      10,
+      0
+    ],
+    "grid": 32,
+    "axes": "xyz"
+  },
+  {
+    "face": 495,
+    "vertices": [
+      442,
+      446,
+      150,
+      150
+    ],
+    "provenance": [
+      21,
+      0,
+      10,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 497,
+    "vertices": [
+      430,
+      76,
+      446,
+      446
+    ],
+    "provenance": [
+      21,
+      0,
+      10,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 1161,
+    "vertices": [
+      659,
+      661,
+      646,
+      646
+    ],
+    "provenance": [
+      6,
+      0,
+      21,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 1162,
+    "vertices": [
+      661,
+      648,
+      646,
+      646
+    ],
+    "provenance": [
+      6,
+      0,
+      21,
+      2
+    ],
+    "grid": 40,
+    "axes": "xyz"
+  },
+  {
+    "face": 477,
+    "vertices": [
+      439,
+      429,
+      180,
+      180
+    ],
+    "provenance": [
+      21,
+      0,
+      10,
+      2
+    ],
+    "grid": 16
+  },
+  {
+    "face": 478,
+    "vertices": [
+      429,
+      205,
+      180,
+      180
+    ],
+    "provenance": [
+      21,
+      0,
+      10,
+      2
+    ],
+    "grid": 24
+  },
+  {
+    "face": 503,
+    "vertices": [
+      180,
+      178,
+      439,
+      439
+    ],
+    "provenance": [
+      21,
+      0,
+      10,
+      0
+    ],
+    "grid": 24
+  },
+  {
+    "face": 479,
+    "vertices": [
+      440,
+      158,
+      439,
+      439
+    ],
+    "provenance": [
+      21,
+      0,
+      10,
+      2
+    ],
+    "grid": 24
+  },
+  {
+    "face": 480,
+    "vertices": [
+      158,
+      429,
+      439,
+      439
+    ],
+    "provenance": [
+      21,
+      0,
+      10,
+      2
+    ],
+    "grid": 24
+  },
+  {
+    "face": 446,
+    "vertices": [
+      429,
+      158,
+      159,
+      159
+    ],
+    "provenance": [
+      21,
+      0,
+      10,
+      2
+    ],
+    "grid": 32
   }
 ]

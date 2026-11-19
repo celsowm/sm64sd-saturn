@@ -5,12 +5,42 @@ mario.c/h from a ROM they provide locally. Full rigging keeps skeleton, skin,
 clips, scales, textures and material allocation as distinct runtime objects.
 """
 from __future__ import annotations
+import math
 import re
 from .common import FormatError,checked_fx,quaternion
 from .bmd import Model
 from .bca import Animation
-from .textures import bake_face,index_bakes
+from .textures import bake_face,index_bakes,index_bakes_lut4
 from .skinning import build_layout
+
+
+def _actor_tile_size(source, uv, max_size: int) -> tuple[int, int]:
+    du = max(
+        math.hypot(uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]),
+        math.hypot(uv[2][0] - uv[3][0], uv[2][1] - uv[3][1]),
+    )
+    dv = max(
+        math.hypot(uv[3][0] - uv[0][0], uv[3][1] - uv[0][1]),
+        math.hypot(uv[2][0] - uv[1][0], uv[2][1] - uv[1][1]),
+    )
+    probe = bake_face(source, uv, 8, samples=1)
+    opaque = {p[:3] for p in probe.rgba if p[3] >= 128}
+    if len(opaque) <= 1 and max(du, dv) <= 10.0:
+        return (8, 8)
+    w = 8 if du <= 7.0 else (16 if du <= 15.0 else min(24, max_size))
+    h = 8 if dv <= 7.0 else (16 if dv <= 15.0 else min(24, max_size))
+    return (min(w, max_size), min(h, max_size))
+
+
+def _rgb_group(mat: int, tile) -> tuple[int, int, int, int]:
+    opaque = [p for p in tile.rgba if p[3] >= 128]
+    if not opaque:
+        return (mat, 0, 0, 0)
+    n = len(opaque)
+    mr = sum(p[0] for p in opaque) / n
+    mg = sum(p[1] for p in opaque) / n
+    mb = sum(p[2] for p in opaque) / n
+    return (mat, int(mr >= 128), int(mg >= 128), int(mb >= 128))
 
 
 def vec(x):
@@ -24,7 +54,8 @@ def c_array_bytes(values,width=16):
 
 def emit_model(model:Model,animations:list[tuple[str,Animation]],name:str,
                rate_num:int=30,rate_den:int=1, *, textured:bool=True,
-               tile_size:int=16,texture_budget:int=256*1024):
+               tile_size:int=16,texture_budget:int=256*1024,
+               lut4:bool=False,adaptive_size:bool=False):
     if not re.fullmatch(r'[a-z][a-z0-9_]*',name):
         raise FormatError('output symbol prefix must be a C identifier')
     if not 1<=rate_num<=32767 or not 1<=rate_den<=65535:
@@ -88,17 +119,25 @@ def emit_model(model:Model,animations:list[tuple[str,Animation]],name:str,
     lines.extend('    '+', '.join(map(str,face))+',' for face in skin.indices)
     lines += ['};','']
 
-    textures=[];palette=();indices=[65535]*len(model.faces)
+    textures=[];palette=();luts=();lut_count=0;indices=[65535]*len(model.faces)
     if textured:
-        bakes=[];which=[]
+        bakes=[];which=[];groups=[]
         for i,(mat,uv) in enumerate(zip(model.face_materials,model.face_uvs)):
             source=model.material_textures[mat]
             if source is None:continue
-            bakes.append(bake_face(source,uv,tile_size));which.append(i)
+            if adaptive_size:
+                w,h=_actor_tile_size(source,uv,tile_size)
+                b=bake_face(source,uv,w,height=h)
+            else:
+                b=bake_face(source,uv,tile_size)
+            bakes.append(b);which.append(i);groups.append(_rgb_group(mat,b))
         if bakes:
-            textures,palette,local_index=index_bakes(bakes)
+            if lut4:
+                textures,luts,lut_count,local_index=index_bakes_lut4(bakes,groups=groups)
+            else:
+                textures,palette,local_index=index_bakes(bakes)
             for i,j in zip(which,local_index):indices[i]=j
-        tex_bytes=sum(len(t.pixels)+(7 & -(len(t.pixels))) for t in textures)
+        tex_bytes=lut_count*32+sum(len(t.pixels)+(7 & -(len(t.pixels))) for t in textures)
         if tex_bytes>texture_budget:
             raise FormatError(f'baked VDP1 textures use {tex_bytes} bytes, budget is {texture_budget}; use --tile-size 8')
         if len(textures)>65535:raise FormatError('too many VDP1 texture tiles')
@@ -107,15 +146,24 @@ def emit_model(model:Model,animations:list[tuple[str,Animation]],name:str,
             lines += [f'static const uint8_t {name}_texture_{i}[{len(tex.pixels)}] = {{',
                       c_array_bytes(tex.pixels),'};']
         lines += ['',f'static const sat_model_texture_asset_t {name}_texture_descriptors[{len(textures)}] = {{']
-        lines += [f'    {{.pixels={name}_texture_{i}, .width={t.width}, .height={t.height}, '
-                  f'.palette_slot=0, .flags=0, .pixel_count={t.width*t.height}}},'
-                  for i,t in enumerate(textures)]
-        lines += ['};',f'static const uint16_t {name}_palette[256] = {{']
-        lines += [c_array_bytes(palette,12).replace('0x','0x')]
-        # c_array_bytes is 8-bit; RGB555 entries need full 16-bit emit instead.
-        lines[-1]='\n'.join('    '+', '.join('0x%04x'%v for v in palette[i:i+12])+','
-                           for i in range(0,256,12))
-        lines += ['};','']
+        if lut4:
+            lines += [f'    {{.pixels={name}_texture_{i}, .width={t.width}, .height={t.height}, '
+                      f'.palette_slot={t.lut_slot}, .flags=SAT_MODEL_TEXTURE_LUT4, .pixel_count={t.width*t.height}}},'
+                      for i,t in enumerate(textures)]
+            lines += ['};',f'static const uint16_t {name}_luts[{len(luts)}] = {{']
+            lines.append('\n'.join('    '+', '.join('0x%04x'%v for v in luts[i:i+12])+','
+                                   for i in range(0,len(luts),12)))
+            lines += ['};','']
+        else:
+            lines += [f'    {{.pixels={name}_texture_{i}, .width={t.width}, .height={t.height}, '
+                      f'.palette_slot=0, .flags=0, .pixel_count={t.width*t.height}}},'
+                      for i,t in enumerate(textures)]
+            lines += ['};',f'static const uint16_t {name}_palette[256] = {{']
+            lines += [c_array_bytes(palette,12).replace('0x','0x')]
+            # c_array_bytes is 8-bit; RGB555 entries need full 16-bit emit instead.
+            lines[-1]='\n'.join('    '+', '.join('0x%04x'%v for v in palette[i:i+12])+','
+                               for i in range(0,256,12))
+            lines += ['};','']
     lines += [f'static const uint16_t {name}_face_textures[{len(indices)}] = {{']
     lines.extend('    '+', '.join('SAT_MESH_TEXTURE_NONE' if n==65535 else str(n)
                                for n in indices[i:i+12])+',' for i in range(0,len(indices),12))
@@ -125,7 +173,8 @@ def emit_model(model:Model,animations:list[tuple[str,Animation]],name:str,
               f'    .face_texture_indices={name}_face_textures,',
               f'    .textures={name}_texture_descriptors, .texture_count={len(textures)},' if textures else
               '    .textures=0, .texture_count=0,',
-              f'    .palettes_rgb555={name}_palette, .palette_count=1, .palette_base=0,' if textures else
+              (f'    .palettes_rgb555=0, .palette_count=0, .palette_base=0, .luts_rgb555={name}_luts, .lut_count={lut_count},'
+               if lut4 else f'    .palettes_rgb555={name}_palette, .palette_count=1, .palette_base=0,') if textures else
               '    .palettes_rgb555=0, .palette_count=0,',
               '};','']
     header.insert(9,f'#define {name.upper()}_TEXTURE_COUNT {len(textures)}u')
@@ -163,15 +212,16 @@ def emit_model(model:Model,animations:list[tuple[str,Animation]],name:str,
                      f'.frame_count={dict((k,v) for k,v in animations)[label].frames}, .joint_count={len(model.bones)}}},'
                      if sc else f'    {{.frames=0, .frame_count=0, .joint_count={len(model.bones)}}},')
     lines += ['};','']
-    report={'output':name,'geometry_mode':'VDP1 indexed8 textured' if textured else 'untextured',
+    report={'output':name,'geometry_mode':('VDP1 LUT4 textured' if lut4 else 'VDP1 indexed8 textured') if textured else 'untextured',
             'pose_rate_assumption':f'{rate_num}/{rate_den} Hz; verify with original game',
             'skeleton_joints':len(model.bones),'rigid_vertices':len(skin.rigid),
             'blended_vertices':len(skin.blend),'native_quad_commands':len(model.faces),
             'source_materials':model.material_count,'source_textures':model.texture_count,
             'weighted_source_matrices':model.weighted_count,'gx_commands':model.gx_commands,
             'clip_stats':clip_stats,'texture_tiles':len(textures),
-            'texture_pixels_bytes':sum(len(t.pixels) for t in textures),
-            'source_color_count':len({v for v in palette if v}),
+            'lut_count':lut_count,
+            'texture_pixels_bytes':lut_count*32+sum(len(t.pixels) for t in textures),
+            'source_color_count':len({v & 0x7fff for v in (luts if lut4 else palette) if v}),
             'max_skin_anchor_quant_error':skin.quant_error,
             'estimated_clip_bytes':sum(a.frames*a.joints*20 for _,a in animations),
             'notes':['ROM-derived C/H files must remain private','renderer has not been boot-tested on an SH-2',

@@ -35,7 +35,7 @@ sat_result_t sat_model_copy_to_mesh(const sat_model_asset_t* m,sat_mesh_t* mesh)
     return SAT_OK;
 }
 sat_result_t sat_model_upload_textures(const sat_model_asset_t* m,sat_vdp1_texture_t* tex,uint16_t cap) {
-    (void)cap;assert(m->palette_base!=0);++uploads;tex[0].valid=1;return SAT_OK;
+    (void)cap;assert(m->palette_base!=0 || m->lut_count>0);++uploads;tex[0].valid=1;return SAT_OK;
 }
 sat_result_t sat_mat4_identity(sat_mat4_t* m) {
     memset(m,0,sizeof(*m));m->m[0]=m->m[5]=m->m[10]=m->m[15]=SAT_FX16_ONE;return SAT_OK;
@@ -106,5 +106,16 @@ int main(void) {
     assert(!memcmp(&prior,&bg.world,sizeof(prior)) && submissions==2);
     scene.active=0;
     assert(sm64ds_background_submit(&bg,&scene,&eye,projected,world_scratch)==SAT_ERR_INVALID_ARG);
+    /* LUT4-only background asset: palette_count=0, lut_count=1, 2 nibbles/byte. */
+    const uint8_t lut4_pixels[]={0x01,0x20,0x12,0x00}; /* indices: 0,1,2,0,1,2,0,0 */
+    const uint16_t lut4_table[16]={0x0000,0x8000|31,0x8000|(31<<5)};
+    const sat_model_texture_asset_t lut4_tex={lut4_pixels,8,1,0,SAT_MODEL_TEXTURE_LUT4,8};
+    sat_model_asset_t lut4_model=model;
+    lut4_model.textures=&lut4_tex;lut4_model.palettes_rgb555=0;
+    lut4_model.palette_count=0;lut4_model.palette_base=0;
+    lut4_model.luts_rgb555=lut4_table;lut4_model.lut_count=1;
+    assert(sm64ds_texture_fallback(&lut4_model,0)==(0x8000|15|(15<<5)));
+    assert(sm64ds_background_init(&bg,&lut4_model,&buf)==SAT_OK && uploads==2);
+    assert(mat[0].rgb555==(0x8000|15|(15<<5)));
     return 0;
 }

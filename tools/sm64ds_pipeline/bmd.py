@@ -35,6 +35,7 @@ class Model:
     weighted:list[WeightedMatrix]=dc_field(default_factory=list)
     face_provenance:list[tuple[int,int,int,int]]=dc_field(default_factory=list)
     material_flags:list[int]=dc_field(default_factory=list)
+    face_colors:list[tuple[tuple[int,int,int],...]]=dc_field(default_factory=list)
 
 
 def _load_matrix_slots(slots, references, resolve):
@@ -122,11 +123,18 @@ def convert_bmd(blob:bytes)->Model:
     npal,ppal=field(data,0x1c,'II')
     nmat,pmat=field(data,0x24,'II')
     if max(ntex,npal,nmat)>4096:raise FormatError('impossible BMD material/texture count')
-    material_textures=[];material_matrices=[];material_generations=[];material_flags=[]
+    material_textures=[];material_matrices=[];material_generations=[];material_flags=[];material_initial_colors=[]
     tex_cache={}
     for i in range(nmat):
         at=pmat+i*0x30;region(data,at,0x30)
-        material_flags.append(field(data,at+0x24,'I'))
+        poly_attr=field(data,at+0x24,'I')
+        dif_amb=field(data,at+0x28,'I')
+        material_flags.append(poly_attr)
+        if (poly_attr&0xf)==0 and (dif_amb&0x8000):
+            c=dif_amb&0x7fff
+            material_initial_colors.append((c&31,(c>>5)&31,(c>>10)&31))
+        else:
+            material_initial_colors.append((31,31,31))
         texid,palid=field(data,at+4,'II')
         params=field(data,at+0x20,'I')
         matrix=list(identity())
@@ -187,10 +195,11 @@ def convert_bmd(blob:bytes)->Model:
             if length&3:raise FormatError('unaligned GX display list')
             geometry.decode(region(data,offset,length),resolve_part_slot,mat,
                 texture_matrix=material_matrices[mat],
-                texture_generation=material_generations[mat],source=(group,di,mat))
+                texture_generation=material_generations[mat],source=(group,di,mat),
+                initial_color=material_initial_colors[mat])
     if not geometry.vertices or not geometry.faces or len(geometry.faces)>=65536:
         raise FormatError('BMD has empty or oversized geometry')
     return Model(bones,geometry.vertices,geometry.faces,shift,nmat,ntex,num_weighted,
                  dict(geometry.gx_commands),geometry.face_uvs,
                  geometry.face_materials,material_textures,weighted,geometry.face_provenance,
-                 material_flags)
+                 material_flags,geometry.face_colors)

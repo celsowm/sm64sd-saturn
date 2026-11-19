@@ -59,7 +59,7 @@ class PlayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)
             (path/'saturn').mkdir()
-            (path/'saturn/math3d.h').write_text('#include <stdint.h>\ntypedef struct {int32_t x,y,z;} sat_vec3_t;\n')
+            (path/'saturn/math3d.h').write_text('#include <stdint.h>\ntypedef struct {int32_t x,y,z;} sat_vec3_t;\ntypedef struct {int32_t m[16];} sat_mat4_t;\n')
             target=path/'play'
             subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=undefined',
                 '-I',str(path),'-I',str(ROOT/'runtime'),str(ROOT/'runtime/sm64ds_play.c'),

@@ -1,0 +1,16 @@
+; Mednafen Saturn input override friendly keys for macOS
+; Key codes are macOS key codes matching run_mednafen.sh
+; Physical key -> Saturn button:
+;   Arrows   = D-pad (move / look)
+;   Z key    = A (jump)       X key = B (run)       C key = C (reset)
+;   A key    = X (zoom)       
+;   Q key    = L (cam left)   W key = R (cam right) Return = Start (pause)
+
+ss.input.port1.3dpad.up    keyboard 0x0 126
+ss.input.port1.3dpad.down  keyboard 0x0 125
+ss.input.port1.3dpad.left  keyboard 0x0 123
+ss.input.port1.3dpad.right keyboard 0x0 124
+ss.input.port1.3dpad.a     keyboard 0x0 29
+ss.input.port1.3dpad.b     keyboard 0x0 27
+ss.input.port1.3dpad.c     keyboard 0x0 06
+ss.input.port1.3dpad.start keyboard 0x0 31

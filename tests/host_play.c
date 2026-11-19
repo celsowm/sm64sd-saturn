@@ -17,6 +17,14 @@ int main(void) {
     sm64ds_collision_t w={prisms,offsets,indices,3,4,4,0,0};
     int32_t y;
     assert(sm64ds_floor(&w,10*O,10*O,O,&y)&&y==0);
+    sat_vec3_t normal={0};
+    assert(sm64ds_floor_normal(&w,10*O,10*O,O,&y,&normal)&&normal.y==O);
+    assert(!sm64ds_floor_normal(&w,10*O,10*O,O,&y,0));
+    sat_mat4_t identity={.m={O,0,0,0, 0,O,0,0, 0,0,O,0, 0,0,0,O}};
+    sat_vec3_t slope={O/4,O,0},origin={0,0,0},foot={-4*O,0,0};
+    assert(sm64ds_ground_pose_lift(&foot,1,&identity,&origin,&slope)==O+O/32);
+    foot.x=4*O;
+    assert(sm64ds_ground_pose_lift(&foot,1,&identity,&origin,&slope)==0);
     assert(!sm64ds_floor(&w,-O,10*O,O,&y));
     assert(!sm64ds_floor(&w,90*O,90*O,O,&y));
     sm64ds_player_t p={.spawn={10*O,0,10*O}};
