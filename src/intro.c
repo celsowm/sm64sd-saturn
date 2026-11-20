@@ -390,18 +390,18 @@ static void init_vdp2_sky_backdrop(void) {
 
     /* Stamp the 4 volumetric ROM clouds from intro_cloud_atlas_4bpp across a seamless 512x256 VDP2 bitmap. */
     static const cloud_stamp_t stamps[] = {
-        /* Large main cloud (src 0,0 -> 184x76) */
-        {  16,  18,   0,  0, 184, 76 },
-        { 270, 126,   0,  0, 184, 76 },
-        /* Top-right puffy cloud (src 184,0 -> 72x42) */
-        { 226,  24, 184,  0,  72, 42 },
-        { 430,  36, 184,  0,  72, 42 },
-        /* Mid-right cloud (src 160,38 -> 96x58) */
-        { 334,  58, 160, 38,  96, 58 },
-        {  96, 142, 160, 38,  96, 58 },
-        /* Bottom-left cloud (src 0,78 -> 124x50) */
-        {  10, 104,   0, 78, 124, 50 },
-        { 206, 166,   0, 78, 124, 50 },
+        /* Large main cloud (src 11,0 -> 173x78) */
+        {  16,  18,  11,  0, 173, 78 },
+        { 276, 124,  11,  0, 173, 78 },
+        /* Top-right puffy cloud (src 186,1 -> 66x37) */
+        { 228,  22, 186,  1,  66, 37 },
+        { 430,  34, 186,  1,  66, 37 },
+        /* Mid-right cloud (src 156,42 -> 99x54) */
+        { 334,  62, 156, 42,  99, 54 },
+        {  96, 146, 156, 42,  99, 54 },
+        /* Bottom-left cloud (src 4,81 -> 116x47) */
+        {  10, 106,   4, 81, 116, 47 },
+        { 208, 168,   4, 81, 116, 47 },
     };
 
     static uint8_t row_buf[512];

@@ -14,6 +14,7 @@
 #include "sm64ds_background.h"
 #include "sm64ds_play.h"
 #include "sm64ds_painter.h"
+#include "sm64ds_stage_handoff.h"
 #include "mario_preview.h"
 #include "mario_head.h"
 #include "castle_scene.h"
@@ -62,6 +63,20 @@
 #endif
 #if CASTLE_HAS_SKYBOX
 #include "skybox_preview.h"
+#endif
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+#include <saturn/asset.h>
+#include <saturn/audio.h>
+#include <saturn/disc_stream.h>
+#include <saturn/music.h>
+#include <saturn/music_codecs.h>
+#include <saturn/vdp2_color_offset.h>
+#include <saturn/vdp2_layers.h>
+#include "lakitu_actor.h"
+#include "warp_pipe.h"
+#include "castle_intro_sfx.h"
+#include "intro_audio_meta.h"
+SAT_MUSIC_CODECS_ADX_FROM_DISC_ONLY;
 #endif
 
 #define ONE SAT_FX16_ONE
@@ -179,11 +194,13 @@ static uint16_t ci[CF*4] __attribute__((section(".wram_l"),aligned(4)));
 static uint16_t cm[CF] __attribute__((section(".wram_l"),aligned(4)));
 #if CASTLE_HAS_SKYBOX
 static sm64ds_background_t sky;
-static sat_vec3_t bv[BN],bw[BN];
-static uint16_t bi[BF*4],bm[BF];
-static sat_vdp1_texture_t bt[BT];
-static sat_scene3d_material_t bmat[BT];
-static sat_projected_vertex_t bp[BN];
+static sat_vec3_t bv[BN] __attribute__((section(".wram_l"),aligned(4)));
+static sat_vec3_t bw[BN] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t bi[BF*4] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t bm[BF] __attribute__((section(".wram_l"),aligned(4)));
+static sat_vdp1_texture_t bt[BT] __attribute__((section(".wram_l"),aligned(4)));
+static sat_scene3d_material_t bmat[BT] __attribute__((section(".wram_l"),aligned(4)));
+static sat_projected_vertex_t bp[BN] __attribute__((section(".wram_l"),aligned(4)));
 /* 8-octant skybox frustum culling: lets LibSaturn's instance_bounds_visible()
  * reject the 4-6 off-screen octants before projection and near/guard clipping. */
 #define SKY_OCT_VCAP (BF*2u)
@@ -205,7 +222,7 @@ static sat_scene3d_instance_binding_t sky_oct_bindings[8];
  * WRAM so corrected material wrapping and detailed actor bakes fit High RAM. */
 static sat_vdp1_texture_t ct[CT] __attribute__((section(".wram_l"),aligned(4)));
 static sat_scene3d_material_t cmat[CT*2] __attribute__((section(".wram_l"),aligned(4)));
-static sat_projected_vertex_t cp[CN];
+static sat_projected_vertex_t cp[CN] __attribute__((section(".wram_l"),aligned(4)));
 static sm64ds_background_t head;
 static sat_vec3_t hv[HN],hw[HN];
 static uint16_t hi[HF*4],hm[HF];
@@ -260,20 +277,63 @@ static sat_mat4_t toad_worlds[CASTLE_TOAD_COUNT];
 static uint16_t hud_paintings_drawn=0,hud_doors_drawn=0,hud_toads_drawn=0;
 #endif
 #if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
-typedef struct {
-    uint32_t magic;
-    uint8_t entrance;
-    uint8_t hud_mode;
-    uint8_t close_camera;
-    uint8_t reserved;
-} sm64ds_warp_arg_t;
-#define SM64DS_WARP_MAGIC 0x534D3634u
 /* Must stay in High WRAM (not .wram_l) because sat_exec stages in Low WRAM. */
 static sat_cd_block_t cd_block;
 static sat_cd_device_t cd_device;
 static sat_cdfs_volume_t cd_volume;
 static uint8_t warp_fade=0;
 static uint8_t warp_target_entrance=0;
+#endif
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+#define LN LAKITU_ACTOR_VERTEX_COUNT
+#define LF LAKITU_ACTOR_FACE_COUNT
+#define LJ LAKITU_ACTOR_JOINT_COUNT
+#define LT LAKITU_ACTOR_TEXTURE_COUNT
+#define PN WARP_PIPE_VERTEX_COUNT
+#define PF WARP_PIPE_FACE_COUNT
+#define PT WARP_PIPE_TEXTURE_COUNT
+#define CASTLE_INTRO_DURATION_TICKS 295u
+static uint8_t intro_cutscene_active=0u;
+static uint8_t intro_cd_mounted=0u;
+static uint8_t intro_music_open=0u;
+static uint8_t intro_audio_ready=0u;
+static uint8_t intro_sfx_flags=0u;
+static uint32_t intro_ticks=0u;
+static int32_t intro_lakitu_anim=0;
+static int16_t intro_fade_cur=1000;
+static sat_disc_stream_t intro_disc __attribute__((section(".wram_l"),aligned(4)));
+static sat_cdfs_file_source_t intro_music_src __attribute__((section(".wram_l"),aligned(4)));
+static sat_cdfs_source_desc_t intro_music_src_desc;
+static sat_asset_desc_t intro_music_asset_desc;
+static sat_asset_t intro_music_asset;
+static sat_music_t intro_music;
+static sat_sound_t intro_sfx_whoosh;
+static sat_sound_t intro_sfx_pipe;
+static uint8_t intro_music_ws[SAT_MUSIC_DISC_WORKSPACE_BYTES(16384u,1u)]
+    __attribute__((section(".wram_l"),aligned(4)));
+/* Lakitu & Green Warp Pipe render buffers (placed in .wram_l to save High WRAM) */
+static sat_vec3_t lv[LN] __attribute__((section(".wram_l"),aligned(4)));
+static sat_vec3_t lw[LN] __attribute__((section(".wram_l"),aligned(4)));
+static sat_projected_vertex_t lp[LN] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t li[LF*4u] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t lm[LF] __attribute__((section(".wram_l"),aligned(4)));
+static sat_vdp1_texture_t lt[LT] __attribute__((section(".wram_l"),aligned(4)));
+static sat_scene3d_material_t lmat[LT+1u] __attribute__((section(".wram_l"),aligned(4)));
+static sat_mesh_t lakitu_mesh;
+static sat_skeleton_pose_joint_t lpose[LJ];
+static sat_vec3_t lscales[LJ];
+static sat_mat4_t lbones[LJ];
+static sat_mat4_t lakitu_world;
+static sat_aabb3_t lakitu_bounds;
+static sat_scene3d_instance_t lakitu_inst;
+static sat_vec3_t pv[PN] __attribute__((section(".wram_l"),aligned(4)));
+static sat_vec3_t pw[PN] __attribute__((section(".wram_l"),aligned(4)));
+static sat_projected_vertex_t pp[PN] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t pi[PF*4u] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t pm[PF] __attribute__((section(".wram_l"),aligned(4)));
+static sat_vdp1_texture_t pt[PT] __attribute__((section(".wram_l"),aligned(4)));
+static sat_scene3d_material_t pmat[PT] __attribute__((section(".wram_l"),aligned(4)));
+static sm64ds_background_t pipe_prop;
 #endif
 static int spawn_yaw_default=CASTLE_SPAWN_YAW;
 static int spawn_facing_default=CASTLE_SPAWN_FACING;
@@ -1677,6 +1737,260 @@ static void draw_debug_hud(const sat_scene_stats_t *stats,uint32_t fps,
 }
 #endif
 
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+static sat_result_t intro_service_cd_audio(void* ctx) {
+    (void)ctx;
+    return intro_audio_ready ? sat_audio_update() : SAT_OK;
+}
+
+static void intro_set_fade(int16_t v) {
+    if (v<-255) v=-255;
+    if (v>255) v=255;
+    if (v==intro_fade_cur) return;
+    intro_fade_cur=v;
+    sat_vdp2_color_offset_t off={v,v,v};
+    (void)sat_vdp2_color_offset_set(SAT_VDP2_COLOR_OFFSET_A,&off);
+}
+
+static void intro_play_sfx(sat_sound_t sfx,uint16_t vol) {
+    if (!intro_audio_ready) return;
+    sat_sound_play_params_t p={.volume=vol,.pan=0,.priority=12u,.flags=0u,.pitch=ONE,.start_tick=0u};
+    (void)sat_sound_play(sfx,&p,0);
+}
+
+static void intro_init_audio(void) {
+    if (sat_audio_init()!=SAT_OK) return;
+    intro_audio_ready=1u;
+    sat_sound_desc_t wd={0};
+    wd.samples=castle_intro_whoosh_pcm;
+    wd.sample_count=CASTLE_INTRO_WHOOSH_SAMPLES;
+    wd.sample_rate=CASTLE_INTRO_SFX_RATE;
+    wd.format=SAT_AUDIO_PCM_S8;
+    (void)sat_sound_create(&intro_sfx_whoosh,&wd);
+    sat_sound_desc_t pd={0};
+    pd.samples=castle_intro_pipe_pcm;
+    pd.sample_count=CASTLE_INTRO_PIPE_SAMPLES;
+    pd.sample_rate=CASTLE_INTRO_SFX_RATE;
+    pd.format=SAT_AUDIO_PCM_S8;
+    (void)sat_sound_create(&intro_sfx_pipe,&pd);
+
+    if (sat_cd_mount_default(&cd_block,intro_service_cd_audio,0,&cd_device,0u,&cd_volume)!=SAT_OK) return;
+    intro_cd_mounted=1u;
+    if (sat_disc_stream_init(&intro_disc,&cd_block)!=SAT_OK) return;
+    intro_music_src_desc=(sat_cdfs_source_desc_t){
+        SM64DS_AUDIO_OPENING_DISC_PATH,"disc/" SM64DS_AUDIO_OPENING_DISC_PATH,SM64DS_AUDIO_OPENING_BYTES
+    };
+    if (sat_cdfs_register_source_manifest(&cd_volume,&intro_music_src_desc,1u,&intro_music_src)!=SAT_OK) return;
+    intro_music_asset_desc=(sat_asset_desc_t){0};
+    intro_music_asset_desc.logical_path="music/opening";
+    intro_music_asset_desc.source_path="disc/" SM64DS_AUDIO_OPENING_DISC_PATH;
+    intro_music_asset_desc.size=intro_music_src.file.size;
+    intro_music_asset_desc.sample_rate=SM64DS_AUDIO_OPENING_SAMPLE_RATE;
+    intro_music_asset_desc.sample_count=SM64DS_AUDIO_OPENING_SAMPLE_COUNT;
+    intro_music_asset_desc.channels=SM64DS_AUDIO_OPENING_CHANNELS;
+    intro_music_asset_desc.format=SM64DS_AUDIO_OPENING_FORMAT;
+    intro_music_asset_desc.kind=SAT_ASSET_STREAM;
+    if (sat_asset_register_manifest(&intro_music_asset_desc,1u,&intro_music_asset)!=SAT_OK) return;
+    sat_music_desc_t mdesc={
+        .asset="music/opening",
+        .disc=&intro_disc,
+        .workspace=intro_music_ws,
+        .workspace_bytes=sizeof(intro_music_ws),
+        .ring_frames=16384u
+    };
+    if (sat_music_open(&intro_music,&mdesc)==SAT_OK) {
+        if (sat_music_play(intro_music)==SAT_OK) intro_music_open=1u;
+        else (void)sat_music_close(intro_music);
+    }
+}
+
+static void intro_finish_cutscene(void) {
+    if (!intro_cutscene_active) return;
+    intro_cutscene_active=0u;
+    if (intro_music_open) {
+        (void)sat_music_stop(intro_music);
+        (void)sat_music_close(intro_music);
+        intro_music_open=0u;
+    }
+    if (intro_audio_ready) {
+        (void)sat_audio_shutdown();
+        intro_audio_ready=0u;
+    }
+    if (intro_cd_mounted) {
+        (void)sat_cdfs_unmount(&cd_volume);
+        intro_cd_mounted=0u;
+    }
+    (void)sat_vdp2_color_offset_disable(SAT_VDP2_LAYER_ALL);
+    (void)sat_vdp2_layers_commit();
+    sm64ds_player_reset(&player);
+    yaw=spawn_yaw_default;
+    camera_yaw=spawn_yaw_default;
+    camera_choice=0;
+    facing=spawn_facing_default;
+    close_camera=1;
+    clip=0;
+    anim_time=0;
+    paused=0;
+}
+
+static void intro_init_props(void) {
+    SAT_PANIC_IF_ERROR(sat_mesh_init(&lakitu_mesh,lv,LN,li,LF));
+    SAT_PANIC_IF_ERROR(sat_model_copy_to_mesh(&lakitu_actor_model,&lakitu_mesh));
+    SAT_PANIC_IF_ERROR(sat_model_upload_textures(&lakitu_actor_model,lt,LT));
+    for (uint16_t i=0u;i<LT;++i) {
+        lmat[i]=(sat_scene3d_material_t){
+            .kind=SAT_SCENE3D_INDEXED_TEXTURED,
+            .rgb555=sm64ds_texture_fallback(&lakitu_actor_model,i),
+            .texture=&lt[i],
+            .color_calc_slot=SAT_INDEXED_SOLID_OPAQUE
+        };
+    }
+    lmat[LT]=(sat_scene3d_material_t){
+        .kind=SAT_SCENE3D_RGB,
+        .rgb555=SAT_RGB555(28,28,28),
+        .texture=0,
+        .color_calc_slot=SAT_INDEXED_SOLID_OPAQUE
+    };
+    for (uint16_t i=0u;i<LF;++i) {
+        uint16_t ti=lakitu_actor_model.face_texture_indices[i];
+        lm[i]=(ti<LT)?ti:LT;
+    }
+    lakitu_inst=(sat_scene3d_instance_t){
+        .mesh=&lakitu_mesh,.materials=lmat,.material_count=(uint16_t)(LT+1u),
+        .face_materials=lm,.world=&lakitu_world,.pass=SM64DS_ACTOR_PASS,
+        .cull_backfaces=SAT_SCENE3D_CULL_SCREEN
+    };
+    const sm64ds_background_buffers_t pb={pv,pi,pt,pmat,pm,PN,PF,PT};
+    SAT_PANIC_IF_ERROR(sm64ds_background_init(&pipe_prop,&warp_pipe_model,&pb));
+    pipe_prop.instance.pass=SM64DS_ACTOR_PASS;
+    pipe_prop.instance.cull_backfaces=SAT_SCENE3D_CULL_SCREEN;
+}
+
+static int32_t intro_smoothstep_fx(uint32_t t,uint32_t dur) {
+    if (dur==0u || t>=dur) return ONE;
+    int32_t u=(int32_t)(((uint64_t)t*(uint64_t)ONE)/dur);
+    int32_t u2=sat_fx16_mul(u,u);
+    return sat_fx16_mul(u2,3*ONE-2*u);
+}
+
+static int32_t intro_lerp(int32_t a,int32_t b,int32_t s) {
+    return a+sat_fx16_mul(b-a,s);
+}
+
+static sat_vec3_t intro_lerp_vec(sat_vec3_t a,sat_vec3_t b,int32_t s) {
+    return (sat_vec3_t){intro_lerp(a.x,b.x,s),intro_lerp(a.y,b.y,s),intro_lerp(a.z,b.z,s)};
+}
+
+static void intro_update_cutscene_pose(int *out_mario_visible,int *out_pipe_visible,int *out_lakitu_visible) {
+    const int32_t sy=player.spawn.y;
+    const sat_vec3_t p0_eye={-96*ONE,118*ONE,130*ONE};
+    const sat_vec3_t p1_eye={76*ONE,98*ONE,155*ONE};
+    const sat_vec3_t p2_eye={40*ONE,sy+28*ONE,205*ONE};
+    const sat_vec3_t p3_eye={26*ONE,sy+26*ONE,296*ONE};
+    const sat_vec3_t p4_eye={player.spawn.x,sy+24*ONE,player.spawn.z+CASTLE_CLOSE_CAM_DIST*ONE};
+
+    const sat_vec3_t t0={0,76*ONE,-45*ONE};
+    const sat_vec3_t t1={0,62*ONE,-20*ONE};
+    const sat_vec3_t t2={player.spawn.x,sy+14*ONE,player.spawn.z};
+    const sat_vec3_t t3={player.spawn.x,sy+10*ONE,player.spawn.z};
+    const sat_vec3_t t4={player.spawn.x,sy+8*ONE,player.spawn.z};
+
+    if (intro_ticks<=18u) {
+        intro_set_fade((int16_t)(255-((int32_t)intro_ticks*255)/18));
+    } else {
+        intro_set_fade(0);
+    }
+
+    if (intro_ticks>=105u && (intro_sfx_flags&1u)==0u) {
+        intro_sfx_flags|=1u;
+        intro_play_sfx(intro_sfx_whoosh,225u);
+    }
+    if (intro_ticks>=195u && (intro_sfx_flags&2u)==0u) {
+        intro_sfx_flags|=2u;
+        intro_play_sfx(intro_sfx_pipe,245u);
+    }
+
+    if (intro_ticks<95u) {
+        int32_t s=intro_smoothstep_fx(intro_ticks,95u);
+        camera.eye=intro_lerp_vec(p0_eye,p1_eye,s);
+        camera.target=intro_lerp_vec(t0,t1,s);
+    } else if (intro_ticks<185u) {
+        int32_t s=intro_smoothstep_fx(intro_ticks-95u,90u);
+        camera.eye=intro_lerp_vec(p1_eye,p2_eye,s);
+        camera.target=intro_lerp_vec(t1,t2,s);
+    } else if (intro_ticks<255u) {
+        int32_t s=intro_smoothstep_fx(intro_ticks-185u,70u);
+        camera.eye=intro_lerp_vec(p2_eye,p3_eye,s);
+        camera.target=intro_lerp_vec(t2,t3,s);
+    } else {
+        int32_t s=intro_smoothstep_fx(intro_ticks-255u,40u);
+        camera.eye=intro_lerp_vec(p3_eye,p4_eye,s);
+        camera.target=intro_lerp_vec(t3,t4,s);
+    }
+    SAT_PANIC_IF_ERROR(sat_camera3d_update(&camera));
+
+    *out_lakitu_visible=(intro_ticks>=95u && intro_ticks<255u)?1:0;
+    if (*out_lakitu_visible) {
+        const sat_skeleton_clip_t *lc=&lakitu_actor_clips[0];
+        SAT_PANIC_IF_ERROR(sat_clip_sample(lc,intro_lakitu_anim,lpose,LJ));
+        SAT_PANIC_IF_ERROR(sm64ds_clip_sample_scale(&lakitu_actor_scale_clips[0],lc,intro_lakitu_anim,lscales,LJ));
+        SAT_PANIC_IF_ERROR(sm64ds_pose_world_matrices(&lakitu_actor_skeleton,lpose,lscales,lbones,LJ));
+        SAT_PANIC_IF_ERROR(sat_skin_update_mesh(&lakitu_actor_skin,lbones,LJ,&lakitu_mesh,0,&lakitu_bounds));
+
+        sat_vec3_t lpos;
+        int32_t lyaw;
+        if (intro_ticks<185u) {
+            int32_t s=intro_smoothstep_fx(intro_ticks-95u,90u);
+            lpos=intro_lerp_vec((sat_vec3_t){-36*ONE,62*ONE,130*ONE},(sat_vec3_t){-18*ONE,sy+22*ONE,242*ONE},s);
+            lpos.x+=sat_sin_deg((int32_t)((intro_ticks*4u)%360u)*ONE)*10;
+            lpos.y+=sat_sin_deg((int32_t)((intro_ticks*6u)%360u)*ONE)*3;
+            lyaw=intro_lerp(20*ONE,55*ONE,s);
+        } else {
+            int32_t s=intro_smoothstep_fx(intro_ticks-185u,70u);
+            lpos=intro_lerp_vec((sat_vec3_t){-18*ONE,sy+22*ONE,242*ONE},(sat_vec3_t){12*ONE,sy+36*ONE,310*ONE},s);
+            lyaw=intro_lerp(55*ONE,190*ONE,s);
+        }
+        sat_model_transform3d_t ltr;
+        sat_model_transform3d_identity(&ltr);
+        ltr.position=lpos;
+        ltr.rotation_deg.y=lyaw;
+        ltr.scale=(sat_vec3_t){ONE/2,ONE/2,ONE/2};
+        SAT_PANIC_IF_ERROR(sat_model_transform3d_matrix(&ltr,&lakitu_world));
+    }
+
+    *out_pipe_visible=(intro_ticks>=160u && intro_ticks<255u)?1:0;
+    if (*out_pipe_visible) {
+        int32_t sink=0;
+        if (intro_ticks>228u) {
+            int32_t s=intro_smoothstep_fx(intro_ticks-228u,27u);
+            sink=sat_fx16_mul(16*ONE,s);
+        }
+        sat_model_transform3d_t ptr;
+        sat_model_transform3d_identity(&ptr);
+        ptr.position=(sat_vec3_t){player.spawn.x,sy-ONE-sink,player.spawn.z};
+        ptr.scale=(sat_vec3_t){ONE/2,ONE/2,ONE/2};
+        SAT_PANIC_IF_ERROR(sat_model_transform3d_matrix(&ptr,&pipe_prop.world));
+    }
+
+    *out_mario_visible=(intro_ticks>=195u)?1:0;
+    player.feet=player.spawn;
+    facing=180;
+    if (intro_ticks>=195u && intro_ticks<230u) {
+        uint32_t jt=intro_ticks-195u;
+        int32_t u=(int32_t)(((uint64_t)jt*(uint64_t)ONE)/35u);
+        int32_t arc=sat_fx16_mul(u,ONE-u)*72;
+        int32_t rise=intro_lerp(-6*ONE,0,intro_smoothstep_fx(jt,12u));
+        player.feet.y=sy+rise+arc;
+        clip=3;
+        anim_time=(int32_t)(((uint64_t)jt*10u*(uint64_t)ONE)/(35u*30u));
+    } else {
+        player.feet.y=sy;
+        clip=0;
+        anim_time=(int32_t)(((intro_ticks%120u)*(uint32_t)ONE)/30u);
+    }
+}
+#endif
+
 #if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
 static void draw_warp_fade(uint8_t step) {
     if (step==0u) return;
@@ -1713,6 +2027,20 @@ int main(void) {
     /* This scene takes several fields to draw. Keep the completed picture
      * visible until VDP1 reaches END instead of swapping a partial list. */
     SAT_PANIC_IF_ERROR(sat_vdp1_set_frame_mode(SAT_VDP1_FRAME_ON_SUBMIT));
+#if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+    sm64ds_warp_arg_t in_arg={0};
+    uint32_t in_arg_len=0;
+    int in_arg_valid=(sat_exec_arg(&in_arg,sizeof(in_arg),&in_arg_len)==SAT_OK &&
+                      in_arg_len==sizeof(in_arg) && in_arg.magic==SM64DS_WARP_MAGIC);
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE)
+    if (in_arg_valid && in_arg.entrance==SM64DS_ENTRANCE_INTRO) {
+        intro_cutscene_active=1u;
+        SAT_PANIC_IF_ERROR(sat_vdp2_color_offset_enable(SAT_VDP2_LAYER_ALL,SAT_VDP2_COLOR_OFFSET_A));
+        intro_set_fade(255);
+        (void)sat_vdp2_layers_commit();
+    }
+#endif
+#endif
     uint32_t bytes=sat_model_vram_estimate_bytes(&mario_preview_model)+
         sat_model_vram_estimate_bytes(&castle_model)+
         sat_model_vram_estimate_bytes(&mario_head_model)+
@@ -1723,6 +2051,12 @@ int main(void) {
 #ifdef CASTLE_PROPS_AVAILABLE
     bytes+=sat_model_vram_estimate_bytes(&castle_tree_model)+
         sat_model_vram_estimate_bytes(&castle_sign_model);
+#endif
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+    if (intro_cutscene_active) {
+        bytes+=sat_model_vram_estimate_bytes(&lakitu_actor_model)+
+            sat_model_vram_estimate_bytes(&warp_pipe_model);
+    }
 #endif
 #ifdef CASTLE_INTERIOR_PROPS_AVAILABLE
     bytes+=sat_model_vram_estimate_bytes(&castle_painting_model)+
@@ -2039,17 +2373,20 @@ int main(void) {
 #endif
 #endif
     SAT_PANIC_IF_ERROR(sat_ascii_font_init_8x8_indexed8(&font,SAT_COLOR_WHITE,0,3));
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+    if (intro_cutscene_active) {
+        intro_init_props();
+        intro_init_audio();
+    }
+#endif
     g_sm64ds_castle_stats.texture_arena_remaining=sat_vdp1_vram_free_bytes();
     player.spawn=(sat_vec3_t){CASTLE_SPAWN_X,CASTLE_SPAWN_Y,CASTLE_SPAWN_Z};
     int32_t spawn_floor_ceiling=CASTLE_SPAWN_FLOOR_CEILING;
 #if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
-    sm64ds_warp_arg_t in_arg={0};
-    uint32_t in_arg_len=0;
-    if (sat_exec_arg(&in_arg,sizeof(in_arg),&in_arg_len)==SAT_OK &&
-        in_arg_len==sizeof(in_arg) && in_arg.magic==SM64DS_WARP_MAGIC) {
+    if (in_arg_valid) {
         if (in_arg.hud_mode<3u) hud_mode=in_arg.hud_mode;
         close_camera=in_arg.close_camera?1:0;
-        if (in_arg.entrance==1u) {
+        if (in_arg.entrance==SM64DS_ENTRANCE_RETURN) {
             player.spawn.x=CASTLE_RETURN_SPAWN_X;
             player.spawn.z=CASTLE_RETURN_SPAWN_Z;
             spawn_floor_ceiling=CASTLE_RETURN_FLOOR_CEILING;
@@ -2097,6 +2434,29 @@ int main(void) {
         sat_pad_state_t pad={0};SAT_PANIC_IF_ERROR(sat_pad_poll(&pad));
         uint32_t now=sat_time_ms(),elapsed=now-previous;previous=now;
         if(elapsed>250)elapsed=250;
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+        int intro_mario_vis=1,intro_pipe_vis=0,intro_lakitu_vis=0;
+        if (intro_cutscene_active) {
+            if (intro_music_open) (void)sat_music_update(intro_music);
+            if (intro_audio_ready) (void)sat_audio_update();
+            if ((pad.pressed&SAT_PAD_START)!=0u && intro_ticks>8u) {
+                intro_finish_cutscene();
+            } else {
+                accumulator+=elapsed*30u;
+                while (accumulator>=1000u && intro_cutscene_active) {
+                    accumulator-=1000u;
+                    ++intro_ticks;
+                    intro_lakitu_anim+=ONE/30;
+                    if (intro_lakitu_anim>=((int32_t)lakitu_actor_clips[0].frame_count*ONE)/30)
+                        intro_lakitu_anim=0;
+                    if (intro_ticks>=CASTLE_INTRO_DURATION_TICKS) {
+                        intro_finish_cutscene();
+                    }
+                }
+            }
+        }
+        if (!intro_cutscene_active) {
+#endif
         if(pad.pressed&SAT_PAD_START)paused=!paused;
         if(pad.pressed&SAT_PAD_C)reset();
         if(pad.pressed&SAT_PAD_X)close_camera=!close_camera;
@@ -2130,6 +2490,9 @@ int main(void) {
             if (warp_fade>=5u) execute_stage_warp(warp_target_entrance);
         }
 #endif
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+        }
+#endif
 #if SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FIXED_CAMERA
         /* Reproduce the same state even when render cadence changes pad polls. */
         sm64ds_player_reset(&player);
@@ -2146,6 +2509,12 @@ int main(void) {
 #if SM64DS_VISUAL_DIAGNOSTICS && !SM64DS_DIAG_LIVE_ANIMATION
         clip=SM64DS_DIAG_CLIP;
         anim_time=(int32_t)(((int64_t)SM64DS_DIAG_FRAME*ONE+29)/30);
+#endif
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+        if (intro_cutscene_active) {
+            intro_update_cutscene_pose(&intro_mario_vis,&intro_pipe_vis,&intro_lakitu_vis);
+            (void)sat_vdp2_layers_commit();
+        }
 #endif
         skin();
         sat_model_transform3d_t transform;
@@ -2176,6 +2545,9 @@ int main(void) {
         }
 #endif
         SAT_PANIC_IF_ERROR(sat_mat4_multiply(&head.world,&actor_world,&bones[15]));
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+        if (!intro_cutscene_active)
+#endif
         update_camera();
 #ifdef CASTLE_ROOM_CULLING
         update_visible_rooms();
@@ -2184,6 +2556,9 @@ int main(void) {
         SAT_PANIC_IF_ERROR(sat_begin_frame());
 #if !SM64DS_VISUAL_DIAGNOSTICS || SM64DS_DIAG_SHOW_UI
         uint16_t overlay_reserve=hud_mode==0u?180u:(hud_mode==1u?56u:4u);
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE)
+        if (intro_cutscene_active) overlay_reserve=32u;
+#endif
 #else
         uint16_t overlay_reserve=0u;
 #endif
@@ -2222,7 +2597,13 @@ int main(void) {
             }
 #elif defined(CASTLE_CHUNK_CULLING)
             hud_chunks_drawn=0u;
-            const uint16_t chunk_cap=(uint16_t)(2048u-overlay_reserve-260u);
+            const uint16_t extra_reserve=
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+                intro_cutscene_active?540u:260u;
+#else
+                260u;
+#endif
+            const uint16_t chunk_cap=(uint16_t)(2048u-overlay_reserve-extra_reserve);
             for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c) {
                 chunk_qfirst[c]=scene.faces.count;
                 if (scene.faces.count<chunk_cap) {
@@ -2271,24 +2652,46 @@ int main(void) {
              SM64DS_DIAG_FAR_DEPTH_COUNT==0))
             submit_interior_props();
 #endif
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+        if (intro_cutscene_active) {
+            if (intro_pipe_vis) {
+                SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&pipe_prop.instance,SAT_SCENE3D_SLOT_INHERIT,pp,pw));
+            }
+            if (intro_lakitu_vis) {
+                SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&lakitu_inst,SAT_SCENE3D_SLOT_INHERIT,lp,lw));
+            }
+        }
+#endif
 #if !SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)
         uint16_t shadow_first=scene.faces.count;
 #endif
-        if (!SM64DS_VISUAL_DIAGNOSTICS ||
+        if ((!SM64DS_VISUAL_DIAGNOSTICS ||
             ((SM64DS_DIAG_OBJECTS&4) && !SM64DS_DIAG_FACE_IDS && !SM64DS_DIAG_CASTLE_FACE_IDS &&
              !SM64DS_DIAG_SOLID && SM64DS_DIAG_FAR_DEPTH_COUNT==0))
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+            && (!intro_cutscene_active || intro_mario_vis)
+#endif
+        )
             submit_mario_shadow();
 #if (!SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)) || (SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FAR_DEPTH_COUNT > 0 && (SM64DS_DIAG_PAIR_DEPTH || SM64DS_DIAG_SUPPORT_DEPTH))
         uint16_t actor_first=scene.faces.count;
 #endif
-        if (!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&4))
+        if ((!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&4))
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+            && (!intro_cutscene_active || intro_mario_vis)
+#endif
+        )
             SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&actor,SAT_SCENE3D_SLOT_INHERIT,projected,world_vertices));
 #if SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FAR_DEPTH_COUNT > 0 && SM64DS_DIAG_PAIR_DEPTH && !SM64DS_DIAG_SUPPORT_DEPTH
         uint16_t actor_end=scene.faces.count;
 #endif
         g_sm64ds_castle_stats.body_clip_candidates=scene.faces.clipped_faces-previous_clipped;
         previous_clipped=scene.faces.clipped_faces;
-        if (!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&8))
+        if ((!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&8))
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+            && (!intro_cutscene_active || intro_mario_vis)
+#endif
+        )
             SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&head.instance,SAT_SCENE3D_SLOT_INHERIT,hp,hw));
         g_sm64ds_castle_stats.head_clip_candidates=scene.faces.clipped_faces-previous_clipped;
 #if !SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)
@@ -2335,6 +2738,11 @@ int main(void) {
         uint32_t late_delta=vdp1_fstats.late_swaps-prev_late_swaps;
         prev_late_swaps=vdp1_fstats.late_swaps;
 #if !SM64DS_VISUAL_DIAGNOSTICS || SM64DS_DIAG_SHOW_UI
+#if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+        if (intro_cutscene_active) {
+            hud_draw_text(224,210,"START:SKIP");
+        } else
+#endif
         draw_debug_hud(&stats,fps,avg_ms,avg_cpu_ms,late_delta);
 #else
         (void)avg_ms;(void)avg_cpu_ms;(void)fps;(void)late_delta;
