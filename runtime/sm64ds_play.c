@@ -23,10 +23,23 @@ static int cell(const sm64ds_collision_t *w,int32_t x,int32_t z) {
     a/=32*ONE;b/=32*ONE;
     return a<w->nx&&b<w->nz ? b*w->nx+a : -1;
 }
+/* CLPS traction=3 slopes (>~20 deg, ny < 0.94) and steep cliffs (>~49.5 deg,
+ * ny < 0.65) cannot be climbed; 45 deg stairs (ny ~ 0.68-0.71, traction != 3)
+ * remain freely walkable. */
+#define SLIPPERY_NORMAL_Y 61600
+#define STEEP_NORMAL_Y 42598
+static int is_slippery_floor(const sm64ds_collision_t *w,const sm64ds_prism_t *p) {
+    if (p->normal.y<STEEP_NORMAL_Y) return 1;
+    if (p->attribute<32u && (w->slippery_attrs&(1u<<p->attribute)) &&
+        p->normal.y<SLIPPERY_NORMAL_Y) return 1;
+    return 0;
+}
 static int floor_query(const sm64ds_collision_t *w,int32_t x,int32_t z,
-                       int32_t ceiling,int32_t *height,sat_vec3_t *normal) {
+                       int32_t ceiling,int32_t *height,sat_vec3_t *normal,
+                       uint8_t *slippery) {
     int bin=cell(w,x,z),found=0;
     int32_t best=INT32_MIN;
+    uint8_t best_slippery=0;
     if(bin<0)return 0;
     for(uint32_t k=w->offsets[bin];k<w->offsets[bin+1];++k) {
         const sm64ds_prism_t *p=&w->prisms[w->indices[k]];
@@ -35,20 +48,25 @@ static int floor_query(const sm64ds_collision_t *w,int32_t x,int32_t z,
                     (int64_t)(z-p->origin.z)*p->normal.z)/p->normal.y);
         if(y>ceiling||y<=best)continue;
         if(inside(p,(sat_vec3_t){x,y,z},ONE/32)) {
-            best=y;found=1;if(normal)*normal=p->normal;
+            best=y;found=1;
+            if(normal)*normal=p->normal;
+            best_slippery=(uint8_t)is_slippery_floor(w,p);
         }
     }
-    if(found)*height=best;
+    if(found) {
+        *height=best;
+        if(slippery)*slippery=best_slippery;
+    }
     return found;
 }
 int sm64ds_floor(const sm64ds_collision_t *w,int32_t x,int32_t z,
                  int32_t ceiling,int32_t *height) {
-    return floor_query(w,x,z,ceiling,height,0);
+    return floor_query(w,x,z,ceiling,height,0,0);
 }
 int sm64ds_floor_normal(const sm64ds_collision_t *w,int32_t x,int32_t z,
                         int32_t ceiling,int32_t *height,sat_vec3_t *normal) {
     if(!normal) return 0;
-    return floor_query(w,x,z,ceiling,height,normal);
+    return floor_query(w,x,z,ceiling,height,normal,0);
 }
 int32_t sm64ds_ground_pose_lift(const sat_vec3_t *vertices,uint16_t count,
                                 const sat_mat4_t *world,const sat_vec3_t *point,
@@ -74,6 +92,26 @@ void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
                         int32_t dx,int32_t dz,uint8_t jump,uint8_t run) {
     ++p->ticks;
     p->moving=dx!=0||dz!=0;p->running=p->moving&&run;
+    if(p->grounded) {
+        int32_t cur_floor=0;sat_vec3_t cur_normal={0,ONE,0};uint8_t cur_slip=0;
+        if(floor_query(w,p->feet.x,p->feet.z,p->feet.y+STEP,&cur_floor,&cur_normal,&cur_slip) &&
+           cur_slip && p->feet.y<=cur_floor+STEP) {
+            jump=0;
+            int64_t hsq=((int64_t)cur_normal.x*cur_normal.x+
+                         (int64_t)cur_normal.z*cur_normal.z)/ONE;
+            if(hsq>ONE/256) {
+                int64_t along=((int64_t)dx*cur_normal.x+(int64_t)dz*cur_normal.z)/ONE;
+                if(along<0) {
+                    dx-=(int32_t)(along*cur_normal.x/hsq);
+                    dz-=(int32_t)(along*cur_normal.z/hsq);
+                }
+            }
+            /* Smooth downhill slide along the slope's horizontal normal. */
+            const int32_t slide=(ONE*5)/2;
+            dx+=mul(slide,cur_normal.x);
+            dz+=mul(slide,cur_normal.z);
+        }
+    }
     if(jump&&p->grounded) {p->velocity_y=3*ONE;p->grounded=0;++p->jumps;}
     int32_t old_y=p->feet.y;
     p->velocity_y-=ONE/8;
@@ -105,11 +143,17 @@ void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
                 }
             }
         }
-        int32_t floor;
+        int32_t floor;sat_vec3_t fnorm={0,ONE,0};uint8_t fslip=0;
         int32_t limit=old_y+(p->grounded?STEP:ONE/4);
-        if(p->velocity_y<=0&&sm64ds_floor(w,p->feet.x,p->feet.z,limit,&floor)&&
+        if(p->velocity_y<=0&&floor_query(w,p->feet.x,p->feet.z,limit,&floor,&fnorm,&fslip)&&
            p->feet.y<=floor+(p->grounded?STEP:ONE/8)) {
-            if(!p->grounded)++p->landings;
+            if(!p->grounded) {
+                ++p->landings;
+                if(fslip) {
+                    p->feet.x+=mul(ONE/2,fnorm.x);
+                    p->feet.z+=mul(ONE/2,fnorm.z);
+                }
+            }
             p->feet.y=floor;p->velocity_y=0;p->grounded=1;
         } else p->grounded=0;
     }

@@ -7,10 +7,8 @@ sdk=${LIBSATURN_PREFIX:-$root/../saturn-prefix-gc}
 source=${LIBSATURN_SOURCE:-$root/../lib-saturn}
 compiler=${LIBSATURN_TOOLCHAIN_ROOT:-$root/../saturn-tools/bin}
 python3 tools/prepare_castle.py --rom "$rom" --out private/castle \
-  --sdk-split-grid 64 --split-radius 48 --libsaturn-source "$source" \
-  --refine-manifest tools/castle_refine_faces.json --refine-grid 32 \
-  --merge-quads --pack-split-quads --vertex-colors --lut4 \
-  --max-edge 96 --max-edge-radius 320 --max-tile-size 48 \
+  --merge-quads --vertex-colors --lut4 \
+  --max-edge 48 --chunk-size 128 --max-tile-size 48 \
   --texture-samples 4 --adaptive-priorities tools/castle_adaptive_priorities.json \
   --texture-budget 245760
 python3 tools/prepare_castle.py --rom "$rom" --out private/castle_1f \

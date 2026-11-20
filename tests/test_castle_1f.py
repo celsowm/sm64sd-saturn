@@ -9,10 +9,20 @@ sys.path.insert(0, str(ROOT / "tools"))
 from sm64ds_pipeline.bmd import convert_bmd
 from sm64ds_pipeline.filesystem import Filesystem
 from sm64ds_pipeline.kcl import decode_kcl
-from sm64ds_pipeline.level_objects import extract_castle_1f_objects
+from sm64ds_pipeline.level_objects import (
+    CASTLE_1F_OVERLAY_ID,
+    CASTLE_GROUNDS_OVERLAY_ID,
+    extract_castle_1f_objects,
+    extract_clps_slippery_mask,
+)
 from sm64ds_pipeline.quad_merge import merge_coplanar_quads
-from sm64ds_pipeline.subdivide import split_long_edges
-from prepare_castle import _compact_rooms, _compute_room_adjacency, _compute_room_portals
+from sm64ds_pipeline.subdivide import cut_faces_against_boxes, split_long_edges
+from prepare_castle import (
+    _compact_chunks,
+    _compact_rooms,
+    _compute_room_adjacency,
+    _compute_room_portals,
+)
 
 ROM = Path(os.environ["SM64DS_ROM"]) if "SM64DS_ROM" in os.environ else None
 
@@ -109,6 +119,69 @@ class Castle1fPipelineTests(unittest.TestCase):
     def test_castle_1f_kcl_decodes_cleanly(self):
         prisms = decode_kcl(self.fs.read("data/stage/castle_1f/castle_1f.kcl"))
         self.assertEqual(len(prisms), 1462)
+
+    def test_clps_slippery_masks_match_overlays(self):
+        ext_mask = extract_clps_slippery_mask(self.fs, CASTLE_GROUNDS_OVERLAY_ID)
+        c1f_mask = extract_clps_slippery_mask(self.fs, CASTLE_1F_OVERLAY_ID)
+        # Outer green boundary hills (0x0d) and invisible walls (0x14) are traction=3.
+        self.assertEqual(ext_mask, 0x00182488)
+        self.assertTrue(ext_mask & (1 << 0x0D))
+        # Castle 1F stair surfaces (0x05..0x08, 0x0b, 0x0f, 0x10) must NOT be slippery.
+        self.assertEqual(c1f_mask, 0x00060400)
+        for stair_attr in (0x05, 0x06, 0x07, 0x08, 0x0B, 0x0F, 0x10):
+            self.assertFalse(c1f_mask & (1 << stair_attr))
+
+    def test_compact_chunks_partitions_and_bounds_faces(self):
+        verts = [
+            (10.0, 0.0, 10.0), (50.0, 0.0, 10.0), (50.0, 5.0, 50.0), (10.0, 5.0, 50.0),
+            (200.0, 10.0, 200.0), (240.0, 10.0, 200.0), (240.0, 20.0, 240.0), (200.0, 20.0, 240.0),
+        ]
+        faces = [(0, 1, 2, 3), (4, 5, 6, 7)]
+        uvs = [((0.0, 0.0),) * 4, ((0.0, 0.0),) * 4]
+        mats = [0, 1]
+        origins = [0, 1]
+        source_sets = [(0,), (1,)]
+        cv, cf, _, _, _, _, fchunks, _, meta = _compact_chunks(
+            verts, faces, uvs, mats, origins, source_sets, None, 128.0
+        )
+        cfirst, ccount, cvfirst, cvcount, cmin, cmax = meta
+        self.assertEqual(len(cfirst), 2)
+        self.assertEqual(sum(ccount), 2)
+        self.assertEqual(len(set(fchunks)), 2)
+        for c in range(2):
+            for fi in range(cfirst[c], cfirst[c] + ccount[c]):
+                for vi in cf[fi]:
+                    self.assertTrue(cvfirst[c] <= vi < cvfirst[c] + cvcount[c])
+                    for axis in range(3):
+                        self.assertTrue(cmin[c][axis] <= cv[vi][axis] <= cmax[c][axis])
+
+    def test_cut_faces_against_boxes_removes_buried_ground(self):
+        # 100x100 grass quad at y=0 with a 20x20 raised hedge box at [40..60]x[40..60], y_top=20.
+        verts = [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (100.0, 0.0, 100.0), (0.0, 0.0, 100.0)]
+        faces = [(0, 1, 2, 3)]
+        uvs = [((0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0))]
+        mats = [3]
+        origins = [0]
+        source_sets = [(0,)]
+        cols = [((255, 255, 255),) * 4]
+        v2, f2, u2, m2, o2, s2, c2 = cut_faces_against_boxes(
+            verts, faces, uvs, mats, origins, source_sets,
+            target_materials={3}, boxes=[(40.0, 60.0, 40.0, 60.0, 20.0)], colors=cols,
+        )
+        # Should split into 4 outside quads totaling 100*100 - 20*20 = 9600 sq units.
+        self.assertEqual(len(f2), 4)
+        self.assertEqual(len(c2), 4)
+        area = 0.0
+        for f in f2:
+            pts = [v2[i] for i in (f[:3] if f[2] == f[3] else f)]
+            cx = sum(p[0] for p in pts) / len(pts)
+            cz = sum(p[2] for p in pts) / len(pts)
+            # No surviving piece centroid may lie inside the subtracted box.
+            self.assertFalse(40.0 < cx < 60.0 and 40.0 < cz < 60.0)
+            xs = [p[0] for p in pts]
+            zs = [p[2] for p in pts]
+            area += (max(xs) - min(xs)) * (max(zs) - min(zs))
+        self.assertAlmostEqual(area, 9600.0, places=3)
 
 
 if __name__ == "__main__":

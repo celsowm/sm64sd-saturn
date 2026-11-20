@@ -14,6 +14,8 @@ typedef struct {
     const uint16_t *indices;
     uint16_t count, nx, nz;
     int32_t origin_x, origin_z;
+    /* Bitmask of CLPS attribute indices (<32) marked traction=3 (unclimbable/slippery). */
+    uint32_t slippery_attrs;
 } sm64ds_collision_t;
 
 typedef struct {

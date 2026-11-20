@@ -11,13 +11,19 @@ from sm64ds_pipeline.cli import main as convert
 from sm64ds_pipeline.kcl import decode_kcl
 from sm64ds_pipeline.skybox import emit_skybox
 from sm64ds_pipeline.textures import bake_face, index_bakes, index_bakes_lut4, BakedTexture
-from sm64ds_pipeline.subdivide import split_large_faces, split_long_edges
+from sm64ds_pipeline.subdivide import cut_faces_against_boxes, split_large_faces, split_long_edges
 from sm64ds_pipeline.sdk_split import split_nearby
 from sm64ds_pipeline.quad_merge import merge_coplanar_quads
 from sm64ds_pipeline.adaptive_bake import adaptive_bakes, adaptive_lut4_bakes
 from sm64ds_pipeline.support_planes import support_planes
 from sm64ds_pipeline.skinning import rest_world, mv
-from sm64ds_pipeline.level_objects import extract_castle_props, extract_castle_1f_objects
+from sm64ds_pipeline.level_objects import (
+    CASTLE_1F_OVERLAY_ID,
+    CASTLE_GROUNDS_OVERLAY_ID,
+    extract_castle_1f_objects,
+    extract_castle_props,
+    extract_clps_slippery_mask,
+)
 
 
 def fx(value):
@@ -29,6 +35,15 @@ def fx(value):
 
 def vec(value):
     return '{' + ','.join(str(fx(v)) for v in value) + '}'
+
+
+def aabb_literal(lo, hi):
+    """Emit a sat_aabb3_t covering [fx(lo), fx(hi)] with >=0 half-extents."""
+    fl = [fx(v) for v in lo]
+    fh = [fx(v) for v in hi]
+    center = [(a + b) // 2 for a, b in zip(fl, fh)]
+    half = [max(0, (b - a + 1) // 2 + 1) for a, b in zip(fl, fh)]
+    return '{{' + ','.join(map(str, center)) + '},{' + ','.join(map(str, half)) + '}}'
 
 
 def array(values, size=16):
@@ -454,6 +469,29 @@ def _compact_rooms(vertices, faces, uvs, materials, origins, source_sets, face_r
     )
 
 
+def _compact_chunks(vertices, faces, uvs, materials, origins, source_sets, colors, cell_size):
+    """Partition world faces into non-empty XZ spatial grid chunks for 6-plane frustum culling."""
+    if cell_size <= 0:
+        raise ValueError('chunk_size must be positive')
+    cells = {}
+    face_chunks = []
+    for f in faces:
+        pts = [vertices[i] for i in (f[:3] if f[2] == f[3] else f)]
+        cx = sum(p[0] for p in pts) / len(pts)
+        cz = sum(p[2] for p in pts) / len(pts)
+        key = (math.floor(cx / cell_size), math.floor(cz / cell_size))
+        cid = cells.get(key)
+        if cid is None:
+            cid = len(cells)
+            cells[key] = cid
+        face_chunks.append(cid)
+    if len(cells) > 255:
+        raise ValueError(f'chunk count {len(cells)} exceeds uint8_t runtime index limit')
+    return _compact_rooms(
+        vertices, faces, uvs, materials, origins, source_sets, face_chunks, colors, len(cells)
+    )
+
+
 def _compute_room_portals(vertices, faces, face_rooms, n_rooms, doors=()):
     """Compute exact doorway portals (center_pos, room_a, room_b) from internal doors."""
     room_pts = [set() for _ in range(n_rooms)]
@@ -513,7 +551,8 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             texture_samples=1, refine_faces=(), refine_grid=0, refine_manifest=None,
             adaptive_priorities=None, stitch_sources=(), stitch_cross_sources=(),
             pack_split_quads=False, vertex_colors=False, merge_quads=False, lut4=False,
-            max_edge=0.0, max_edge_radius=0.0, max_tile_size=48, stage='main_castle'):
+            max_edge=0.0, max_edge_radius=0.0, max_tile_size=48, stage='main_castle',
+            chunk_size=0.0):
     if stage not in ('main_castle', 'castle_1f'):
         raise ValueError(f'unsupported stage: {stage}')
     is_interior = (stage == 'castle_1f')
@@ -595,6 +634,34 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             refine_grids = new_grids
             refine_axes = new_axes
 
+    if not is_interior and max_edge > 0:
+        # Subtract raised hedge box footprints (mat 8, 19 tops) from underlying
+        # continuous grass ground (mat 3) so buried grass cannot sort over hedge
+        # walls under Saturn's average-depth painter sort.
+        hedge_boxes = []
+        seen_boxes = set()
+        for f, mat in zip(faces, materials):
+            if mat not in (8, 19):
+                continue
+            pts = [vertices[vi] for vi in (f[:3] if f[2] == f[3] else f)]
+            ys = [p[1] for p in pts]
+            if max(ys) - min(ys) > 0.1:
+                continue
+            xs = [p[0] for p in pts]
+            zs = [p[2] for p in pts]
+            box = (min(xs), max(xs), min(zs), max(zs), max(ys))
+            key = tuple(round(v, 2) for v in box)
+            if key not in seen_boxes and box[1] - box[0] > 1.0 and box[3] - box[2] > 1.0:
+                seen_boxes.add(key)
+                hedge_boxes.append(box)
+        if hedge_boxes:
+            pre_len = len(faces)
+            vertices, faces, uvs, materials, origins, source_sets, colors = cut_faces_against_boxes(
+                vertices, faces, uvs, materials, origins, source_sets,
+                target_materials={3}, boxes=hedge_boxes, colors=colors,
+            )
+            face_rooms = [0] * len(faces)
+
     split_center = (-64, 16) if is_interior else (0, 256)
     if sdk_split:
         if sdk_path is None:
@@ -634,17 +701,23 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         pre_origins = origins
         pre_source_sets = source_sets
         pre_rooms = face_rooms
-        high_y = 60.0 if is_interior else None
-        high_me = max_edge * 2.0 if is_interior else None
+        if is_interior:
+            sub_kw = {'high_y': 60.0, 'high_max_edge': max_edge * 2.0}
+        else:
+            # Fine bilinear quads everywhere Mario can walk (including west hedge maze);
+            # keep distant outer mountains, upper spires, and deep moat walls compact.
+            sub_kw = {
+                'play_box': (-455.0, 360.0, -20.0, 90.0, -240.0, 430.0),
+                'outside_max_edge': 160.0,
+                'material_max_edges': {9: 24.0, 18: 24.0},
+            }
         if colors is not None:
             vertices, faces, uvs, materials, split_origins, colors = split_long_edges(
-                vertices, faces, uvs, materials, max_edge,
-                colors=colors, high_y=high_y, high_max_edge=high_me,
+                vertices, faces, uvs, materials, max_edge, colors=colors, **sub_kw
             )
         else:
             vertices, faces, uvs, materials, split_origins = split_long_edges(
-                vertices, faces, uvs, materials, max_edge,
-                high_y=high_y, high_max_edge=high_me,
+                vertices, faces, uvs, materials, max_edge, **sub_kw
             )
         origins = [pre_origins[o] for o in split_origins]
         source_sets = [pre_source_sets[o] for o in split_origins]
@@ -652,10 +725,17 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         (out / 'castle_split_origins.json').write_text(json.dumps(origins) + '\n')
 
     room_meta = None
+    chunk_meta = None
+    face_chunks = None
     if is_interior and len(m.bones) > 1:
         (vertices, faces, uvs, materials, origins, source_sets,
          face_rooms, colors, room_meta) = _compact_rooms(
             vertices, faces, uvs, materials, origins, source_sets, face_rooms, colors, len(m.bones)
+        )
+    elif not is_interior and chunk_size > 0:
+        (vertices, faces, uvs, materials, origins, source_sets,
+         face_chunks, colors, chunk_meta) = _compact_chunks(
+            vertices, faces, uvs, materials, origins, source_sets, colors, chunk_size
         )
 
     def bake_castle(size):
@@ -738,7 +818,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     flat_faces = [i for i, face in enumerate(faces)
                   if len({fx(vertices[index][1]) for index in face}) == 1]
     planes = support_planes(vertices, faces)
-    header = ['#pragma once', '#include <saturn/model3d.h>', '#include "sm64ds_play.h"']
+    header = ['#pragma once', '#include <saturn/model3d.h>', '#include <saturn/collide3d.h>', '#include "sm64ds_play.h"']
     if is_interior:
         header += [
             '#define CASTLE_STAGE_ID 1u',
@@ -873,10 +953,14 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     for b in bins:
         indices.extend(b)
         offsets.append(len(indices))
+    slippery_mask = extract_clps_slippery_mask(
+        fs, CASTLE_1F_OVERLAY_ID if is_interior else CASTLE_GROUNDS_OVERLAY_ID
+    )
     code += ['static const uint32_t offsets[]={', array(offsets), '};',
              'static const uint16_t collision_indices[]={', array(indices), '};',
              'const sm64ds_collision_t castle_collision={.prisms=prisms,.offsets=offsets,.indices=collision_indices,',
-             f'.count={len(prisms)},.nx={nx},.nz={nz},.origin_x={fx(ox)},.origin_z={fx(oz)}' + '};', '']
+             f'.count={len(prisms)},.nx={nx},.nz={nz},.origin_x={fx(ox)},.origin_z={fx(oz)},'
+             f'.slippery_attrs=0x{slippery_mask:08x}u' + '};', '']
     props_report = {}
     c1f_objs = None
     if lut4:
@@ -920,6 +1004,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             'extern const uint16_t castle_room_vcount[CASTLE_ROOM_COUNT];',
             'extern const sat_vec3_t castle_room_min[CASTLE_ROOM_COUNT];',
             'extern const sat_vec3_t castle_room_max[CASTLE_ROOM_COUNT];',
+            'extern const sat_aabb3_t castle_room_bounds[CASTLE_ROOM_COUNT];',
             'extern const uint8_t castle_room_adj[CASTLE_ROOM_COUNT];',
             'extern const uint8_t castle_support_rooms[];',
             'extern const uint16_t castle_floor_decals[];',
@@ -936,6 +1021,8 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             ',\n'.join(vec(v) for v in room_min), '};',
             'const sat_vec3_t castle_room_max[CASTLE_ROOM_COUNT]={',
             ',\n'.join(vec(v) for v in room_max), '};',
+            'const sat_aabb3_t castle_room_bounds[CASTLE_ROOM_COUNT]={',
+            ',\n'.join(aabb_literal(lo, hi) for lo, hi in zip(room_min, room_max)), '};',
             'const uint8_t castle_room_adj[CASTLE_ROOM_COUNT]={', array(room_adj), '};',
             'const uint8_t castle_support_rooms[]={', array(support_rooms), '};',
             'const uint16_t castle_floor_decals[]={', array(floor_decals or [0]), '};',
@@ -951,6 +1038,33 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         props_report['castle_room_vcounts'] = room_vcount
         props_report['castle_room_adj'] = room_adj
         props_report['castle_portal_count'] = len(room_portals)
+    elif chunk_meta is not None:
+        chunk_first, chunk_count_arr, chunk_vfirst, chunk_vcount, chunk_min, chunk_max = chunk_meta
+        support_chunks = [face_chunks[f] for f, _ in planes] or [0]
+        header += [
+            '#define CASTLE_CHUNK_CULLING 1',
+            f'#define CASTLE_CHUNK_COUNT {len(chunk_first)}u',
+            'extern const uint16_t castle_chunk_first[CASTLE_CHUNK_COUNT];',
+            'extern const uint16_t castle_chunk_count[CASTLE_CHUNK_COUNT];',
+            'extern const uint16_t castle_chunk_vfirst[CASTLE_CHUNK_COUNT];',
+            'extern const uint16_t castle_chunk_vcount[CASTLE_CHUNK_COUNT];',
+            'extern const sat_aabb3_t castle_chunk_bounds[CASTLE_CHUNK_COUNT];',
+            'extern const uint8_t castle_support_chunks[];',
+        ]
+        code += [
+            'const uint16_t castle_chunk_first[CASTLE_CHUNK_COUNT]={', array(chunk_first), '};',
+            'const uint16_t castle_chunk_count[CASTLE_CHUNK_COUNT]={', array(chunk_count_arr), '};',
+            'const uint16_t castle_chunk_vfirst[CASTLE_CHUNK_COUNT]={', array(chunk_vfirst), '};',
+            'const uint16_t castle_chunk_vcount[CASTLE_CHUNK_COUNT]={', array(chunk_vcount), '};',
+            'const sat_aabb3_t castle_chunk_bounds[CASTLE_CHUNK_COUNT]={',
+            ',\n'.join(aabb_literal(lo, hi) for lo, hi in zip(chunk_min, chunk_max)), '};',
+            'const uint8_t castle_support_chunks[]={', array(support_chunks), '};',
+            '',
+        ]
+        props_report['castle_chunk_count'] = len(chunk_first)
+        props_report['castle_chunk_max_faces'] = max(chunk_count_arr) if chunk_count_arr else 0
+        props_report['castle_chunk_size'] = chunk_size
+    props_report['clps_slippery_mask'] = f'0x{slippery_mask:08x}'
     (out / 'castle_scene.h').write_text('\n'.join(header) + '\n')
     (out / 'castle_scene.c').write_text('\n'.join(code))
 
@@ -1037,9 +1151,10 @@ if __name__ == '__main__':
     p.add_argument('--texture-budget', type=int, default=96 * 1024, help='Adaptive castle pixel budget in bytes')
     p.add_argument('--texture-samples', type=int, choices=(1, 2, 4), default=1, help='Samples per axis for filtered castle bakes')
     p.add_argument('--stage', choices=('main_castle', 'castle_1f'), default='main_castle', help='Castle stage to export')
+    p.add_argument('--chunk-size', type=float, default=0, help='Partition exterior world into XZ spatial chunks of this size for frustum culling')
     a = p.parse_args()
     prepare(a.rom, a.out, a.tile_size, a.split_edge, a.sdk_split_grid,
             a.libsaturn_source, a.split_radius, a.adaptive_faces, a.texture_budget, a.texture_samples,
             a.refine_face, a.refine_grid, a.refine_manifest, a.adaptive_priorities, a.stitch_source, a.stitch_cross_source,
             a.pack_split_quads, a.vertex_colors, a.merge_quads, a.lut4, a.max_edge, a.max_edge_radius, a.max_tile_size,
-            a.stage)
+            a.stage, a.chunk_size)

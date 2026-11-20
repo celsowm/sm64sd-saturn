@@ -286,3 +286,36 @@ def extract_castle_1f_objects(fs: Filesystem) -> Castle1fObjects:
                     toad_rooms.append(room)
 
     return Castle1fObjects(doors=doors, paintings=paintings, toads=toads, toad_rooms=toad_rooms)
+
+
+def extract_clps_slippery_mask(fs: Filesystem, overlay_id: int) -> int:
+    """Return a bitmask of CLPS attribute indices marked traction=3 (unclimbable/slippery).
+
+    SM64DS level overlays embed small 1-entry helper CLPS blocks for objects before
+    the stage's main multi-entry CLPS table. Select the largest valid 8-byte-entry
+    CLPS chunk in the overlay and extract all indices < 32 with traction == 3.
+    """
+    _ram_addr, data = read_arm9_overlay(fs, overlay_id)
+    best_off = -1
+    best_count = 0
+    pos = 0
+    while True:
+        idx = data.find(b"CLPS", pos)
+        if idx < 0:
+            break
+        pos = idx + 4
+        if idx + 8 > len(data):
+            continue
+        entry_sz, count = struct.unpack_from("<HH", data, idx + 4)
+        if entry_sz == 8 and count > best_count and idx + 8 + count * 8 <= len(data):
+            best_off = idx + 8
+            best_count = count
+    if best_off < 0:
+        raise FormatError(f"CLPS table not found in ARM9 overlay {overlay_id}")
+    mask = 0
+    for i in range(min(best_count, 32)):
+        lo = struct.unpack_from("<I", data, best_off + i * 8)[0]
+        traction = (lo >> 12) & 0x7
+        if traction == 3:
+            mask |= 1 << i
+    return mask

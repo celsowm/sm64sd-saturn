@@ -14,7 +14,7 @@ int main(void) {
     uint32_t offsets[17];uint16_t indices[48];
     for(int i=0;i<17;++i)offsets[i]=i*3;
     for(int i=0;i<48;++i)indices[i]=i%3;
-    sm64ds_collision_t w={prisms,offsets,indices,3,4,4,0,0};
+    sm64ds_collision_t w={prisms,offsets,indices,3,4,4,0,0,0};
     int32_t y;
     assert(sm64ds_floor(&w,10*O,10*O,O,&y)&&y==0);
     sat_vec3_t normal={0};
@@ -56,6 +56,35 @@ int main(void) {
     p.feet=(sat_vec3_t){200*O,-161*O,200*O};
     sm64ds_player_step(&p,&w,0,0,0,0);
     assert(p.feet.x==p.spawn.x&&p.feet.y==p.spawn.y&&p.feet.z==p.spawn.z);
-    puts("floor, ledge, wall, jump, ceiling, landing, camera and void reset passed");
+    /* Slippery CLPS traction=3 slope (normal ~ (-0.6, 0.8, 0), attr 13) prevents
+     * climbing/jumping uphill and slides Mario downhill (-X). */
+    const sm64ds_prism_t slope_prisms[]={
+        {.origin={0,0,0},.normal={-39322,52429,0},
+         .edges={{-52429,-39322,0},{0,0,-O},{52429,39322,O}},
+         .min={0,0,0},.max={100*O,80*O,100*O},.extent=125*O,.attribute=13}
+    };
+    uint32_t soffsets[17];uint16_t sindices[16];
+    for(int i=0;i<17;++i)soffsets[i]=i;
+    for(int i=0;i<16;++i)sindices[i]=0;
+    sm64ds_collision_t sw={slope_prisms,soffsets,sindices,1,4,4,0,0,(1u<<13)};
+    int32_t sy=0;
+    assert(sm64ds_floor(&sw,40*O,20*O,100*O,&sy));
+    sm64ds_player_t sp={.spawn={40*O,sy,20*O}};
+    sm64ds_player_reset(&sp);
+    sm64ds_player_step(&sp,&sw,0,0,0,0);
+    assert(sp.grounded);
+    uint32_t jumps_before=sp.jumps;
+    int32_t x_before=sp.feet.x;
+    for(int i=0;i<15;++i)sm64ds_player_step(&sp,&sw,O*3/2,0,1,1);
+    assert(sp.jumps==jumps_before);
+    assert(sp.feet.x<x_before-5*O);
+    /* Same slope without slippery bit (45-deg walkable stairs/ramp) is climbable. */
+    sw.slippery_attrs=0;
+    sm64ds_player_reset(&sp);
+    sm64ds_player_step(&sp,&sw,0,0,0,0);
+    x_before=sp.feet.x;
+    for(int i=0;i<15;++i)sm64ds_player_step(&sp,&sw,O,0,0,1);
+    assert(sp.feet.x>x_before+5*O);
+    puts("floor, ledge, wall, jump, ceiling, landing, camera, slope and void reset passed");
     return 0;
 }
