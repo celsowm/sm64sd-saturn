@@ -6,9 +6,12 @@ import json
 import math
 from pathlib import Path
 from sm64ds_pipeline.filesystem import Filesystem
+from sm64ds_pipeline.bca import Animation
 from sm64ds_pipeline.bmd import convert_bmd
 from sm64ds_pipeline.cli import main as convert
+from sm64ds_pipeline.emit import emit_model
 from sm64ds_pipeline.kcl import decode_kcl
+from sm64ds_pipeline.sdat import SdatArchive, resample_wave_s8
 from sm64ds_pipeline.skybox import emit_skybox
 from sm64ds_pipeline.textures import bake_face, index_bakes, index_bakes_lut4, BakedTexture
 from sm64ds_pipeline.subdivide import cut_faces_against_boxes, split_large_faces, split_long_edges
@@ -552,7 +555,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             adaptive_priorities=None, stitch_sources=(), stitch_cross_sources=(),
             pack_split_quads=False, vertex_colors=False, merge_quads=False, lut4=False,
             max_edge=0.0, max_edge_radius=0.0, max_tile_size=48, stage='main_castle',
-            chunk_size=0.0):
+            chunk_size=0.0, warp_target='', with_intro_props=False):
     if stage not in ('main_castle', 'castle_1f'):
         raise ValueError(f'unsupported stage: {stage}')
     is_interior = (stage == 'castle_1f')
@@ -841,7 +844,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             '#define CASTLE_BG_G 4',
             '#define CASTLE_BG_B 7',
             '#define CASTLE_WARP_AVAILABLE 1',
-            '#define CASTLE_WARP_TARGET_BIN "0.BIN"',
+            f'#define CASTLE_WARP_TARGET_BIN "{warp_target or "0.BIN"}"',
             '#define CASTLE_WARP_TARGET_ENTRANCE 1u',
             f'#define CASTLE_WARP_MIN_X {fx(-78.0)}',
             f'#define CASTLE_WARP_MAX_X {fx(-50.0)}',
@@ -872,7 +875,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             '#define CASTLE_BG_G 20',
             '#define CASTLE_BG_B 30',
             '#define CASTLE_WARP_AVAILABLE 1',
-            '#define CASTLE_WARP_TARGET_BIN "C1F.BIN"',
+            f'#define CASTLE_WARP_TARGET_BIN "{warp_target or "C1F.BIN"}"',
             '#define CASTLE_WARP_TARGET_ENTRANCE 0u',
             f'#define CASTLE_WARP_MIN_X {fx(-16.0)}',
             f'#define CASTLE_WARP_MAX_X {fx(16.0)}',
@@ -1065,6 +1068,8 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         props_report['castle_chunk_max_faces'] = max(chunk_count_arr) if chunk_count_arr else 0
         props_report['castle_chunk_size'] = chunk_size
     props_report['clps_slippery_mask'] = f'0x{slippery_mask:08x}'
+    if with_intro_props and not is_interior:
+        header += ['#define CASTLE_INTRO_PROPS_AVAILABLE 1']
     (out / 'castle_scene.h').write_text('\n'.join(header) + '\n')
     (out / 'castle_scene.c').write_text('\n'.join(code))
 
@@ -1090,6 +1095,66 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         raise ValueError('head attachment requires its original model scale')
     (out / 'mario_head.h').write_text(h)
     (out / 'mario_head.c').write_text(c)
+
+    if with_intro_props and not is_interior:
+        lakitu = convert_bmd(fs.read('data/enemy/c_jugem/c_jugem.bmd'))
+        lakitu_wait = Animation(fs.read('data/enemy/c_jugem/c_jugem_wait.bca'), len(lakitu.bones))
+        lh, lc, lakitu_stats = emit_model(
+            lakitu, [('wait', lakitu_wait)], 'lakitu_actor',
+            textured=True, tile_size=8, texture_budget=16 * 1024, lut4=lut4, adaptive_size=False,
+        )
+        (out / 'lakitu_actor.h').write_text(lh)
+        (out / 'lakitu_actor.c').write_text(lc)
+
+        pipe_m = convert_bmd(fs.read('data/normal_obj/obj_dokan/obj_dokan.bmd'))
+        ph, pc, pipe_stats = emit_skybox(
+            pipe_m, 'warp_pipe', palette_base=5, tile_size=16, lut4=lut4, adaptive_size=lut4,
+        )
+        (out / 'warp_pipe.h').write_text(ph)
+        (out / 'warp_pipe.c').write_text(pc)
+
+        sdat = SdatArchive(fs.read('data/sound_data.sdat'))
+        swar_open = sdat.decode_swar_waves(35)
+        sfx_rate = 12000
+        whoosh_pcm = resample_wave_s8(swar_open[0], sfx_rate)
+        pipe_pcm = resample_wave_s8(swar_open[3], sfx_rate)
+        if len(whoosh_pcm) & 1:
+            whoosh_pcm += b'\x00'
+        if len(pipe_pcm) & 1:
+            pipe_pcm += b'\x00'
+        def _s8_rows(raw):
+            rows = []
+            for idx in range(0, len(raw), 16):
+                vals = [b - 256 if b >= 128 else b for b in raw[idx:idx + 16]]
+                rows.append('    ' + ', '.join(f'{v:4d}' for v in vals) + ',')
+            return '\n'.join(rows)
+        (out / 'castle_intro_sfx.h').write_text('\n'.join([
+            '#pragma once',
+            '#include <stdint.h>',
+            f'#define CASTLE_INTRO_SFX_RATE {sfx_rate}u',
+            f'#define CASTLE_INTRO_WHOOSH_SAMPLES {len(whoosh_pcm)}u',
+            f'#define CASTLE_INTRO_PIPE_SAMPLES {len(pipe_pcm)}u',
+            'extern const int8_t castle_intro_whoosh_pcm[CASTLE_INTRO_WHOOSH_SAMPLES];',
+            'extern const int8_t castle_intro_pipe_pcm[CASTLE_INTRO_PIPE_SAMPLES];',
+            '',
+        ]))
+        (out / 'castle_intro_sfx.c').write_text('\n'.join([
+            '#include "castle_intro_sfx.h"',
+            '/* Locally generated from a user-provided ROM; not for public distribution. */',
+            'const int8_t castle_intro_whoosh_pcm[CASTLE_INTRO_WHOOSH_SAMPLES] = {',
+            _s8_rows(whoosh_pcm),
+            '};',
+            'const int8_t castle_intro_pipe_pcm[CASTLE_INTRO_PIPE_SAMPLES] = {',
+            _s8_rows(pipe_pcm),
+            '};',
+            '',
+        ]))
+        props_report['intro_props'] = {
+            'lakitu_tex_bytes': lakitu_stats['texture_pixels_bytes'],
+            'pipe_tex_bytes': pipe_stats['texture_pixels_bytes'],
+            'pipe_scale_divisor': pipe_stats['scale_divisor'],
+            'sfx_bytes': len(whoosh_pcm) + len(pipe_pcm),
+        }
     report = {'rom_sha256': fs.sha256, 'stage': stage, 'render_vertices': len(vertices), 'render_faces': len(faces),
               'render_quads': sum(1 for f in faces if f[2] != f[3]),
               'render_triangles': sum(1 for f in faces if f[2] == f[3]),
@@ -1152,9 +1217,11 @@ if __name__ == '__main__':
     p.add_argument('--texture-samples', type=int, choices=(1, 2, 4), default=1, help='Samples per axis for filtered castle bakes')
     p.add_argument('--stage', choices=('main_castle', 'castle_1f'), default='main_castle', help='Castle stage to export')
     p.add_argument('--chunk-size', type=float, default=0, help='Partition exterior world into XZ spatial chunks of this size for frustum culling')
+    p.add_argument('--warp-target', default='', help='Override target binary name for stage warp (e.g. EXT.BIN)')
+    p.add_argument('--with-intro-props', action='store_true', help='Also emit Lakitu, green warp pipe, and opening SFX for Act III cutscene')
     a = p.parse_args()
     prepare(a.rom, a.out, a.tile_size, a.split_edge, a.sdk_split_grid,
             a.libsaturn_source, a.split_radius, a.adaptive_faces, a.texture_budget, a.texture_samples,
             a.refine_face, a.refine_grid, a.refine_manifest, a.adaptive_priorities, a.stitch_source, a.stitch_cross_source,
             a.pack_split_quads, a.vertex_colors, a.merge_quads, a.lut4, a.max_edge, a.max_edge_radius, a.max_tile_size,
-            a.stage, a.chunk_size)
+            a.stage, a.chunk_size, a.warp_target, a.with_intro_props)

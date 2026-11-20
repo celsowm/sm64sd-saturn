@@ -43,3 +43,13 @@ def lz77(data: bytes) -> bytes:
     return bytes(result)
 
 
+def lz77_auto(data: bytes) -> bytes:
+    """Decode either SM64DS 'LZ77'-prefixed or raw DS BIOS 0x10 LZ10 streams."""
+    if data[:4] == b"LZ77":
+        return lz77(data)
+    if len(data) >= 4 and data[0] == 0x10:
+        return lz77(b"LZ77" + data)
+    return data
+
+
+
