@@ -13,6 +13,7 @@ from sm64ds_pipeline.emit import emit_model
 from sm64ds_pipeline.kcl import decode_kcl
 from sm64ds_pipeline.sdat import SdatArchive, resample_wave_s8
 from sm64ds_pipeline.skybox import emit_skybox
+from sm64ds_pipeline.sky_panorama import emit_sky_panorama
 from sm64ds_pipeline.textures import bake_face, index_bakes, index_bakes_lut4, BakedTexture
 from sm64ds_pipeline.subdivide import cut_faces_against_boxes, split_large_faces, split_long_edges
 from sm64ds_pipeline.sdk_split import split_nearby
@@ -1083,6 +1084,12 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         if not is_interior:
             convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', 'data/vrbox/vr02.bmd',
                      '--name', 'skybox_preview'])
+    if not is_interior:
+        # VDP2 sky for the default build; skybox_preview stays for diagnostics.
+        sh, sc, sky_report = emit_sky_panorama(convert_bmd(fs.read('data/vrbox/vr02.bmd')), 'sky_panorama')
+        (out / 'sky_panorama.h').write_text(sh)
+        (out / 'sky_panorama.c').write_text(sc)
+        (out / 'sky_panorama.json').write_text(json.dumps(sky_report, indent=2) + '\n')
 
     # The gameplay head shares the body's bone-local convention. The
     # top-level b_mario_head_cap is a different, larger model/orientation.

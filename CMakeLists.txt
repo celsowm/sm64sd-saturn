@@ -51,6 +51,7 @@ option(SM64DS_BUILD_CASTLE "Build the playable castle exterior" OFF)
 set(SM64DS_CASTLE_1F_DIR "" CACHE PATH "Optional generated directory for Castle 1F interior (packaged as C1F.BIN)")
 set(SM64DS_INTRO_DIR "" CACHE PATH "Optional generated directory for SM64DS intro (packaged as 0.BIN)")
 option(SM64DS_VISUAL_DIAGNOSTICS "Enable deterministic visual diagnostic controls" OFF)
+option(SM64DS_VDP2_SKY "Draw the castle sky as a VDP2 panorama when sky_panorama.c was generated" ON)
 set(SM64DS_DIAG_OBJECTS "15" CACHE STRING "Diagnostic object mask: sky=1, castle=2, body=4, head=8")
 set(SM64DS_DIAG_CLIP "0" CACHE STRING "Diagnostic frozen clip index")
 set(SM64DS_DIAG_FRAME "0" CACHE STRING "Diagnostic frozen animation frame at 30 Hz")
@@ -107,8 +108,17 @@ if(SM64DS_BUILD_CASTLE)
     runtime/sm64ds_pose.c runtime/sm64ds_background.c runtime/sm64ds_painter.c
     "${SM64DS_GENERATED_DIR}/mario_preview.c"
     "${SM64DS_GENERATED_DIR}/castle_scene.c"
-    "${SM64DS_GENERATED_DIR}/mario_head.c"
-    "${SM64DS_GENERATED_DIR}/skybox_preview.c")
+    "${SM64DS_GENERATED_DIR}/mario_head.c")
+  # The VDP2 panorama replaces the VDP1 skybox mesh, whose huge faces all take
+  # the scene flush's clipping fallback. Diagnostic builds keep the mesh.
+  set(_castle_vdp2_sky 0)
+  if(SM64DS_VDP2_SKY AND NOT SM64DS_VISUAL_DIAGNOSTICS AND
+     EXISTS "${SM64DS_GENERATED_DIR}/sky_panorama.c")
+    set(_castle_vdp2_sky 1)
+    list(APPEND _castle_sources "${SM64DS_GENERATED_DIR}/sky_panorama.c")
+  else()
+    list(APPEND _castle_sources "${SM64DS_GENERATED_DIR}/skybox_preview.c")
+  endif()
   set(_castle_includes runtime "${SM64DS_GENERATED_DIR}")
   if(EXISTS "${SM64DS_GENERATED_DIR}/lakitu_actor.c")
     list(APPEND _castle_sources
@@ -122,6 +132,7 @@ if(SM64DS_BUILD_CASTLE)
   add_executable(sm64ds_castle ${_castle_sources})
   target_include_directories(sm64ds_castle PRIVATE ${_castle_includes})
   target_compile_definitions(sm64ds_castle PRIVATE
+    SM64DS_VDP2_SKY=${_castle_vdp2_sky}
     SM64DS_VISUAL_DIAGNOSTICS=$<BOOL:${SM64DS_VISUAL_DIAGNOSTICS}>
     SM64DS_DIAG_OBJECTS=${SM64DS_DIAG_OBJECTS}
     SM64DS_DIAG_CLIP=${SM64DS_DIAG_CLIP}

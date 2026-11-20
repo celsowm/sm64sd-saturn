@@ -42,6 +42,14 @@
 #ifndef SM64DS_DIAG_SHOW_UI
 #define SM64DS_DIAG_SHOW_UI 0
 #endif
+#ifndef SM64DS_VDP2_SKY
+#define SM64DS_VDP2_SKY 0
+#endif
+#if SM64DS_VDP2_SKY
+/* The sky is a VDP2 panorama: the VDP1 skybox mesh is not built. */
+#undef CASTLE_HAS_SKYBOX
+#define CASTLE_HAS_SKYBOX 0
+#endif
 #ifndef CASTLE_HAS_SKYBOX
 #define CASTLE_HAS_SKYBOX 1
 #endif
@@ -63,6 +71,12 @@
 #endif
 #if CASTLE_HAS_SKYBOX
 #include "skybox_preview.h"
+#endif
+#if SM64DS_VDP2_SKY
+#include <saturn/lz.h>
+#include <saturn/math2d.h>
+#include <saturn/vdp2_layers.h>
+#include "sky_panorama.h"
 #endif
 #if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
 #include <saturn/asset.h>
@@ -1184,6 +1198,150 @@ static void init_shadow_texture(void) {
     }
 }
 
+/* Frame-time experiments, off by default: skip the sky, or skip castle
+ * chunks whose XZ bounds lie farther than SM64DS_EXP_FAR_CULL world units
+ * from the camera. */
+#ifndef SM64DS_EXP_NO_SKY
+#define SM64DS_EXP_NO_SKY 0
+#endif
+#ifndef SM64DS_EXP_FAR_CULL
+#define SM64DS_EXP_FAR_CULL 0
+#endif
+#ifdef CASTLE_CHUNK_CULLING
+static int exp_chunk_far(uint8_t c) {
+    if (!SM64DS_EXP_FAR_CULL) return 0;
+    const sat_aabb3_t *b=&castle_chunk_bounds[c];
+    int32_t dx=(camera.eye.x>b->center.x?camera.eye.x-b->center.x:b->center.x-camera.eye.x)-b->half.x;
+    int32_t dz=(camera.eye.z>b->center.z?camera.eye.z-b->center.z:b->center.z-camera.eye.z)-b->half.z;
+    if (dx<0) dx=0;
+    if (dz<0) dz=0;
+    dx>>=16; dz>>=16;
+    return dx*dx+dz*dz>SM64DS_EXP_FAR_CULL*SM64DS_EXP_FAR_CULL;
+}
+#endif
+
+#if SM64DS_VDP2_SKY
+/* The sky is a cylindrical panorama (sky_panorama.h) on NBG0, behind the
+ * sprite layer, instead of a camera-following VDP1 mesh: the mesh's huge
+ * faces all took the flush's clipping fallback, about a third of a frame.
+ * The scroll follows the camera's yaw and pitch, and is written in the
+ * VBlank that swaps in the list it was computed for. */
+#define SKY_PALETTE_BANK 3u
+#define SKY_BAND_BYTES ((uint32_t)SKY_PANORAMA_WIDTH*SKY_PANORAMA_BAND_ROWS)
+#define VDP2_REG16(offset) (*(volatile uint16_t*)(0x25F80000u+(offset)))
+static uint8_t sky_band[SKY_BAND_BYTES] __attribute__((section(".wram_l"),aligned(4)));
+static int32_t sky_half_w,sky_half_h;     /* screen half size in bitmap pixels, 16.16 */
+typedef struct { uint32_t serial; int32_t x,y; } sky_scroll_t;
+static volatile sky_scroll_t sky_pending[4];
+
+static uint8_t sky_pixel(void *user,uint16_t x,uint16_t y) {
+    (void)user;
+    int32_t row=(int32_t)y-(int32_t)SKY_PANORAMA_BAND_FIRST;
+    if (row<0) row=0;
+    if (row>=(int32_t)SKY_PANORAMA_BAND_ROWS) row=(int32_t)SKY_PANORAMA_BAND_ROWS-1;
+    return sky_band[(uint32_t)row*SKY_PANORAMA_WIDTH+x];
+}
+
+static uint32_t sky_isqrt64(uint64_t v) {
+    uint64_t root=0,bit=(uint64_t)1<<62;
+    while (bit>v) bit>>=2;
+    while (bit) {
+        if (v>=root+bit) { v-=root+bit; root=(root>>1)+bit; }
+        else root>>=1;
+        bit>>=2;
+    }
+    return (uint32_t)root;
+}
+
+/* Top-left bitmap dot (16.16) for the current camera. Column u looks along
+ * azimuth -2*pi*u/width, so screen x and bitmap x grow together; row v looks
+ * at tan(elevation) = (horizon - v) / focal. */
+static void sky_scroll_for_camera(int32_t *out_x,int32_t *out_y) {
+    const int32_t fx=camera.target.x-camera.eye.x;
+    const int32_t fy=camera.target.y-camera.eye.y;
+    const int32_t fz=camera.target.z-camera.eye.z;
+    const uint16_t theta=sat_atan2_16(fx,fz);
+    const int32_t column=(int32_t)((uint32_t)(uint16_t)(0u-theta)*SKY_PANORAMA_WIDTH);
+    *out_x=(column-sky_half_w)&(int32_t)(SKY_PANORAMA_WIDTH*ONE-1);
+    const uint32_t flat=sky_isqrt64((uint64_t)((int64_t)fx*fx+(int64_t)fz*fz));
+    int64_t tan_pitch=flat?((int64_t)fy*ONE)/(int64_t)flat:(fy>0?4*ONE:-4*ONE);
+    if (tan_pitch>4*ONE) tan_pitch=4*ONE;
+    if (tan_pitch<-4*ONE) tan_pitch=-4*ONE;
+    *out_y=(int32_t)((int64_t)SKY_PANORAMA_HORIZON_ROW*ONE-
+                     ((int64_t)SKY_PANORAMA_FOCAL_FX16*tan_pitch)/ONE)-sky_half_h;
+}
+
+/* VBlank of the swap that shows list `serial`: NBG0 scroll registers
+ * (SCXIN0/SCXDN0/SCYIN0/SCYDN0, 8 fractional bits) with plain CPU writes. */
+static void sky_swap_handler(uint32_t serial,void *user) {
+    (void)user;
+    const sky_scroll_t *s=(const sky_scroll_t*)&sky_pending[serial&3u];
+    if (s->serial!=serial) return;
+    VDP2_REG16(0x070)=(uint16_t)(((uint32_t)s->x>>16)&0x07FFu);
+    VDP2_REG16(0x072)=(uint16_t)((uint32_t)s->x&0xFF00u);
+    VDP2_REG16(0x074)=(uint16_t)(((uint32_t)s->y>>16)&0x07FFu);
+    VDP2_REG16(0x076)=(uint16_t)((uint32_t)s->y&0xFF00u);
+}
+
+/* Called once per frame before sat_end_frame: the scroll for the list that
+ * call will submit. The layer manager keeps the same value, so a
+ * sat_vdp2_layers_commit (intro fades) does not move the sky back. */
+static void sky_update(void) {
+    int32_t x,y;
+    sky_scroll_for_camera(&x,&y);
+    const uint32_t serial=sat_vdp1_list_serial()+1u;
+    volatile sky_scroll_t *s=&sky_pending[serial&3u];
+    s->serial=0u;
+    s->x=x;
+    s->y=y;
+    s->serial=serial;
+    SAT_PANIC_IF_ERROR(sat_vdp2_layer_set_scroll(SAT_VDP2_NBG0,x,y));
+}
+
+static void sky_init(void) {
+    uint32_t bytes=0;
+    SAT_PANIC_IF_ERROR(sat_lz_decode(sky_panorama_lz,SKY_PANORAMA_LZ_BYTES,
+                                     sky_band,SKY_BAND_BYTES,&bytes));
+    if (bytes!=SKY_BAND_BYTES) SAT_PANIC_IF_ERROR(SAT_ERR_IO);
+    SAT_PANIC_IF_ERROR(sat_vdp2_palette_upload(sky_panorama_palette,256u,
+                                               (uint16_t)(SKY_PALETTE_BANK*256u)));
+    uint16_t row_words[SKY_PANORAMA_WIDTH/2u];
+    SAT_PANIC_IF_ERROR(sat_vdp2_bitmap_upload_indexed8(
+        0u,SKY_PANORAMA_WIDTH,SKY_PANORAMA_HEIGHT,sky_pixel,0,0,
+        row_words,SKY_PANORAMA_WIDTH/2u));
+    sat_vdp2_layer_config_t cfg;
+    sat_vdp2_layer_config_default(SAT_VDP2_NBG0,&cfg);
+    cfg.bitmap=1u;
+    cfg.color_mode=SAT_VDP2_COLOR_MODE_256;
+    cfg.bitmap_size=SKY_PANORAMA_HEIGHT==512u?SAT_VDP2_BITMAP_512X512:SAT_VDP2_BITMAP_512X256;
+    cfg.priority=1u;            /* behind the sprite layer */
+    cfg.transparent=0u;
+    cfg.palette=SKY_PALETTE_BANK;
+    cfg.plane_address[0]=0u;
+    SAT_PANIC_IF_ERROR(sat_vdp2_layer_configure(&cfg));
+    /* Screen focal length (224/2) / tan(fov_y/2) over the bitmap's
+     * width/(2*pi): one bitmap dot then spans the screen pixels one radian
+     * of azimuth does. */
+    const sat_angle16_t half_fov=(sat_angle16_t)(((int64_t)camera.fov_y*32768)/(180*ONE)/2);
+    const int64_t screen_focal=((int64_t)112*sat_cos16(half_fov)*ONE)/sat_sin16(half_fov);
+    const uint32_t zoom=(uint32_t)((screen_focal*ONE)/SKY_PANORAMA_FOCAL_FX16);
+    SAT_PANIC_IF_ERROR(sat_vdp2_layer_set_zoom(SAT_VDP2_NBG0,zoom,zoom));
+    sky_half_w=(int32_t)(((int64_t)160*ONE*ONE)/zoom);
+    sky_half_h=(int32_t)(((int64_t)112*ONE*ONE)/zoom);
+    int32_t x,y;
+    sky_scroll_for_camera(&x,&y);
+    SAT_PANIC_IF_ERROR(sat_vdp2_layer_set_scroll(SAT_VDP2_NBG0,x,y));
+    SAT_PANIC_IF_ERROR(sat_vdp1_set_erase_transparent());
+    SAT_PANIC_IF_ERROR(sat_vdp2_layers_commit());
+    SAT_PANIC_IF_ERROR(sat_vdp1_set_swap_handler(sky_swap_handler,0));
+}
+
+static void sky_shutdown(void) {
+    (void)sat_vdp1_set_swap_handler(0,0);
+    (void)sat_vdp2_layer_release(SAT_VDP2_NBG0);
+}
+#endif
+
 static void submit_mario_shadow(void) {
     int32_t floor_y=0;
     sat_vec3_t normal={0,ONE,0};
@@ -2035,7 +2193,13 @@ static void execute_stage_warp(uint8_t entrance) {
     };
     sat_result_t r=sat_cd_mount_default(&cd_block,0,0,&cd_device,0u,&cd_volume);
     if (r==SAT_OK) {
+#if SM64DS_VDP2_SKY
+        sky_shutdown();
+#endif
         (void)sat_exec(&cd_volume,CASTLE_WARP_TARGET_BIN,&out_arg,sizeof(out_arg));
+#if SM64DS_VDP2_SKY
+        sky_init();
+#endif
     }
     /* If the target binary is absent (e.g. standalone single-stage test disc),
      * cancel the fade gracefully so gameplay continues uninterrupted. */
@@ -2446,6 +2610,9 @@ int main(void) {
     camera.aspect=sat_fx16_div(320*ONE,224*ONE);camera.near_z=ONE;camera.far_z=1600*ONE;
 #endif
     camera.near_z=ONE;camera.far_z=1600*ONE;
+#if SM64DS_VDP2_SKY
+    sky_init();
+#endif
     uint32_t previous=sat_time_ms(),accumulator=0;
     uint16_t jump_pending=0;
     uint32_t frame_ms_ring[8]={0},cpu_ms_ring[8]={0};
@@ -2586,7 +2753,9 @@ int main(void) {
         update_visible_rooms();
 #endif
         profile_lap(PROF_CAMERA);
+#if !SM64DS_VDP2_SKY
         SAT_PANIC_IF_ERROR(sat_set_clear_color(SAT_RGB555(CASTLE_BG_R,CASTLE_BG_G,CASTLE_BG_B)));
+#endif
         SAT_PANIC_IF_ERROR(sat_begin_frame());
 #if !SM64DS_VISUAL_DIAGNOSTICS || SM64DS_DIAG_SHOW_UI
         uint16_t overlay_reserve=hud_mode==0u?180u:(hud_mode==1u?56u:4u);
@@ -2600,7 +2769,7 @@ int main(void) {
         uint16_t previous_clipped=scene.faces.clipped_faces;
         profile_lap(PROF_BEGIN);
 #if CASTLE_HAS_SKYBOX
-        if (!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&1)) {
+        if (!SM64DS_EXP_NO_SKY && (!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&1))) {
             if (sky_oct_ready) {
                 SAT_PANIC_IF_ERROR(sat_mat4_translate(&sky.world,camera.eye.x,camera.eye.y,camera.eye.z));
                 for (uint8_t o=0;o<8u;++o) {
@@ -2613,6 +2782,9 @@ int main(void) {
                 SAT_PANIC_IF_ERROR(sm64ds_background_submit(&sky,&scene,&camera.eye,bp,bw));
             }
         }
+#endif
+#if SM64DS_VDP2_SKY
+        sky_update();
 #endif
         profile_lap(PROF_SKY);
         g_sm64ds_castle_stats.sky_clip_candidates=scene.faces.clipped_faces-previous_clipped;
@@ -2642,7 +2814,7 @@ int main(void) {
             const uint16_t chunk_cap=(uint16_t)(2048u-overlay_reserve-extra_reserve);
             for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c) {
                 chunk_qfirst[c]=scene.faces.count;
-                if (scene.faces.count<chunk_cap) {
+                if (scene.faces.count<chunk_cap && !exp_chunk_far(c)) {
                     uint16_t v0=castle_chunk_vfirst[c];
                     SAT_PANIC_IF_ERROR(sat_scene_submit_instance(
                         &scene,&chunk_instances[c],SAT_SCENE3D_SLOT_INHERIT,&cp[v0],0));
