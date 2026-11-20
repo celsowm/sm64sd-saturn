@@ -1048,6 +1048,28 @@ volatile struct {
     int32_t mario_facing,camera_fov_y;
 } g_sm64ds_castle_stats={.magic=0x43415331};
 
+/* Per-stage main-loop cost in FRT ticks (sat_time_frequency_hz per second),
+ * summed over every draw. end_frame includes the wait for the VDP1 to finish
+ * the previous list, so it separates VDP1-bound from CPU-bound frames. */
+enum {
+    PROF_VBLANK,PROF_SIM,PROF_SKIN,PROF_CAMERA,PROF_BEGIN,PROF_SKY,PROF_CASTLE,
+    PROF_PROPS,PROF_ACTOR,PROF_SUPPORT,PROF_FLUSH,PROF_HUD,PROF_END,PROF_COUNT
+};
+volatile struct {
+    uint32_t magic,frequency_hz,frames,sim_steps,max_sim_steps;
+    uint32_t vdp1_draw_waits,vdp1_draw_timeouts,vdp1_late_swaps;
+    uint32_t sum[PROF_COUNT],max[PROF_COUNT];
+} g_sm64ds_castle_profile={.magic=0x50524f46};
+static uint64_t profile_mark;
+static void profile_lap(unsigned stage) {
+    uint64_t now=sat_time_ticks();
+    uint64_t delta=now>=profile_mark?now-profile_mark:0u;
+    uint32_t ticks=delta>UINT32_MAX?UINT32_MAX:(uint32_t)delta;
+    profile_mark=now;
+    g_sm64ds_castle_profile.sum[stage]+=ticks;
+    if(ticks>g_sm64ds_castle_profile.max[stage]) g_sm64ds_castle_profile.max[stage]=ticks;
+}
+
 static void skin(void) {
     const sat_skeleton_clip_t *c=&mario_preview_clips[clip];
     SAT_PANIC_IF_ERROR(sat_clip_sample(c,anim_time,pose,J));
@@ -2429,8 +2451,14 @@ int main(void) {
     uint32_t frame_ms_ring[8]={0},cpu_ms_ring[8]={0};
     uint32_t frame_ms_sum=0,cpu_ms_sum=0,prev_late_swaps=0;
     uint8_t timing_idx=0,timing_count=0;
+    g_sm64ds_castle_profile.frequency_hz=sat_time_frequency_hz();
+    profile_mark=sat_time_ticks();
     while(1) {
-        SAT_PANIC_IF_ERROR(sat_wait_vblank());
+        /* No VBlank wait: in SAT_VDP1_FRAME_ON_SUBMIT mode sat_end_frame
+         * already waits for the previous list's swap before reusing its
+         * VRAM, and a frame takes several fields of CPU work, so waiting
+         * here only idled the CPU until the next field. */
+        profile_lap(PROF_VBLANK);
         sat_pad_state_t pad={0};SAT_PANIC_IF_ERROR(sat_pad_poll(&pad));
         uint32_t now=sat_time_ms(),elapsed=now-previous;previous=now;
         if(elapsed>250)elapsed=250;
@@ -2475,7 +2503,10 @@ int main(void) {
 #endif
         ) {
             accumulator+=elapsed*60;
-            while(accumulator>=1000) {simulation(&pad,jump_pending!=0);jump_pending=0;accumulator-=1000;}
+            uint32_t steps=0;
+            while(accumulator>=1000) {simulation(&pad,jump_pending!=0);jump_pending=0;accumulator-=1000;++steps;}
+            g_sm64ds_castle_profile.sim_steps+=steps;
+            if(steps>g_sm64ds_castle_profile.max_sim_steps) g_sm64ds_castle_profile.max_sim_steps=steps;
         } else {accumulator=0;jump_pending=0;}
 #if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
         if (warp_fade==0u && player.ticks>45u &&
@@ -2516,7 +2547,9 @@ int main(void) {
             (void)sat_vdp2_layers_commit();
         }
 #endif
+        profile_lap(PROF_SIM);
         skin();
+        profile_lap(PROF_SKIN);
         sat_model_transform3d_t transform;
         sat_model_transform3d_identity(&transform);
         /* The imported BMD skin is twice the gameplay-space height in the
@@ -2552,6 +2585,7 @@ int main(void) {
 #ifdef CASTLE_ROOM_CULLING
         update_visible_rooms();
 #endif
+        profile_lap(PROF_CAMERA);
         SAT_PANIC_IF_ERROR(sat_set_clear_color(SAT_RGB555(CASTLE_BG_R,CASTLE_BG_G,CASTLE_BG_B)));
         SAT_PANIC_IF_ERROR(sat_begin_frame());
 #if !SM64DS_VISUAL_DIAGNOSTICS || SM64DS_DIAG_SHOW_UI
@@ -2564,6 +2598,7 @@ int main(void) {
 #endif
         SAT_PANIC_IF_ERROR(sat_scene_begin(&scene,&camera,camera.near_z,320,224,overlay_reserve));
         uint16_t previous_clipped=scene.faces.clipped_faces;
+        profile_lap(PROF_BEGIN);
 #if CASTLE_HAS_SKYBOX
         if (!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&1)) {
             if (sky_oct_ready) {
@@ -2579,6 +2614,7 @@ int main(void) {
             }
         }
 #endif
+        profile_lap(PROF_SKY);
         g_sm64ds_castle_stats.sky_clip_candidates=scene.faces.clipped_faces-previous_clipped;
         previous_clipped=scene.faces.clipped_faces;
 #if (!SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)) || (SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FAR_DEPTH_COUNT > 0)
@@ -2640,6 +2676,7 @@ int main(void) {
 #endif
         g_sm64ds_castle_stats.castle_clip_candidates=scene.faces.clipped_faces-previous_clipped;
         previous_clipped=scene.faces.clipped_faces;
+        profile_lap(PROF_CASTLE);
 #ifdef CASTLE_PROPS_AVAILABLE
         if (!SM64DS_VISUAL_DIAGNOSTICS ||
             ((SM64DS_DIAG_OBJECTS&2) && !SM64DS_DIAG_CASTLE_FACE_IDS && !SM64DS_DIAG_SOLID &&
@@ -2662,6 +2699,7 @@ int main(void) {
             }
         }
 #endif
+        profile_lap(PROF_PROPS);
 #if !SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)
         uint16_t shadow_first=scene.faces.count;
 #endif
@@ -2694,6 +2732,7 @@ int main(void) {
         )
             SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&head.instance,SAT_SCENE3D_SLOT_INHERIT,hp,hw));
         g_sm64ds_castle_stats.head_clip_candidates=scene.faces.clipped_faces-previous_clipped;
+        profile_lap(PROF_ACTOR);
 #if !SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)
         order_support_behind_actor(castle_first,castle_end,shadow_first,actor_first,scene.faces.count);
 #endif
@@ -2718,7 +2757,9 @@ int main(void) {
 #elif SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FAR_DEPTH_COUNT > 0 && SM64DS_DIAG_GEOMETRIC_DEPTH
         diagnostic_geometric_depth(castle_first,castle_end);
 #endif
+        profile_lap(PROF_SUPPORT);
         SAT_PANIC_IF_ERROR(sat_scene_flush_trusted(&scene));
+        profile_lap(PROF_FLUSH);
         sat_scene_stats_t stats={0};sat_scene_stats(&scene,&stats);
         uint32_t cpu_ms=sat_time_ms()-now;
         if (cpu_ms>250u) cpu_ms=250u;
@@ -2764,6 +2805,12 @@ int main(void) {
         g_sm64ds_castle_stats.culled=stats.culled_faces;
         g_sm64ds_castle_stats.clipped=stats.clipped_faces;
         g_sm64ds_castle_stats.fallback=stats.fallback_faces;
+        profile_lap(PROF_HUD);
         SAT_PANIC_IF_ERROR(sat_end_frame());
+        profile_lap(PROF_END);
+        ++g_sm64ds_castle_profile.frames;
+        g_sm64ds_castle_profile.vdp1_draw_waits=vdp1_fstats.draw_waits;
+        g_sm64ds_castle_profile.vdp1_draw_timeouts=vdp1_fstats.draw_timeouts;
+        g_sm64ds_castle_profile.vdp1_late_swaps=vdp1_fstats.late_swaps;
     }
 }

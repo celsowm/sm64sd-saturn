@@ -111,7 +111,7 @@ def main():
     common = ['cmake', '-S', ROOT, '-B', args.build_dir,
               '-DCMAKE_BUILD_TYPE=Release',
               f'-DCMAKE_TOOLCHAIN_FILE={ROOT.parent}/lib-saturn/cmake/toolchains/sh2eb-elf.cmake',
-              f'-DCMAKE_PREFIX_PATH={ROOT.parent}/saturn-prefix-gc',
+              f'-DCMAKE_PREFIX_PATH={ROOT.parent}/saturn-prefix',
               f'-DSM64DS_GENERATED_DIR={args.generated_dir.resolve()}',
               '-DSM64DS_BUILD_CASTLE=ON', '-DSM64DS_VISUAL_DIAGNOSTICS=ON',
               '-DSM64DS_DIAG_FIXED_CAMERA=ON', '-DSM64DS_DIAG_ABSOLUTE_CAMERA=ON',

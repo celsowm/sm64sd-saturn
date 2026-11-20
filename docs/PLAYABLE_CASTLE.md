@@ -13,7 +13,7 @@ actors, sound and missions remain open.
 ```
 
 The build script accepts an alternate ROM as its first argument. Defaults use
-sibling `lib-saturn`, `saturn-prefix-gc` and `saturn-tools/bin` directories.
+sibling `lib-saturn`, `saturn-prefix` and `saturn-tools/bin` directories.
 Override `LIBSATURN_SOURCE`, `LIBSATURN_PREFIX`, `LIBSATURN_TOOLCHAIN_ROOT` and
 `LIBSATURN_BIOS` as needed. No dependencies are downloaded.
 
@@ -157,3 +157,71 @@ filtered `castle-filtered.png` fixed-camera capture shows a smoother wall than
 Texture pixel residency is 82,816 bytes across 1,294 castle tiles. The current
 790-field Ymir route completed 72 draws with one jump, three landings, two
 resets, zero sampled skipped faces and no panic.
+
+## Frame-time baseline
+
+`g_sm64ds_castle_profile` sums FRT ticks per main-loop stage over every
+completed draw. `end` is `sat_end_frame`, which waits for the VDP1 to finish
+the previous list, so it separates VDP1-bound from CPU-bound frames.
+`tools/profile_castle_frames.py` replays `tests/castle_route.pad` (controls)
+and `tests/castle_orbit.pad` (spawn camera orbit) in the probe, reads the
+block from the High WRAM dump and ranks `--profile-pc` samples by symbol
+after the boot/load fields. The wall route now warps into the 1F interior,
+a different program, so it is not used here.
+
+Probe baseline (injection boot, no SH-2 cache emulation, immediate division;
+not a hardware measurement):
+
+| Stage | controls ms/draw | orbit ms/draw |
+| --- | ---: | ---: |
+| VBlank wait | 13.1 | 11.9 |
+| Simulation (6.6–6.7 steps) | 5.2 | 4.5 |
+| Skin | 2.8 | 2.8 |
+| Camera | 1.6 | 1.7 |
+| Sky submit | 8.4 | 9.1 |
+| Castle chunk submit | 29.2 | 23.9 |
+| Props | 0.8 | 1.3 |
+| Shadow/body/head submit | 4.7 | 5.0 |
+| Support ordering | 6.1 | 5.7 |
+| Scene flush | 50.1 | 43.3 |
+| HUD | 1.1 | 1.1 |
+| VDP1 wait (`end`) | 0.02 | 0.02 |
+| **Total** | **123.1 (7.4 fields)** | **110.2 (6.6 fields)** |
+
+The scene is CPU-bound on the Master SH-2: the VDP1 always finishes before
+the next submit (zero draw waits). Flush plus castle and sky submission are
+~75% of a draw; `project`, `submit_instance`, `instance_bounds_visible` and
+64-bit division helpers lead the PC samples. Simulation catch-up is ~5 ms,
+not the main cost. The trailing VBlank wait costs a further ~12 ms per draw.
+Results are in `private/frame-profile/baseline/`.
+
+### Phase 1 progress
+
+The flush cost is dominated by fallback faces, not by the ~900 projected-safe
+ones: with fallback emission disabled as an experiment, the flush fell from
+48.9 to 8.6 ms (controls) and 43.2 to 8.3 ms (orbit). About 200–270 faces per
+draw take the fallback, mostly textured faces with a corner past the 2× screen
+sprite bound; they render as screen-clipped solid polygons (the flat green
+ground near the camera).
+
+| Change | controls ms/draw | orbit ms/draw |
+| --- | ---: | ---: |
+| LibSaturn HEAD, before changes | 118.6 | 110.3 |
+| Textured fallback shares the sprite's depth test and projection | 110.7 | 100.3 |
+| No VBlank wait at the top of the castle loop | 94.4 | 89.6 |
+
+- LibSaturn `draw_textured_quad_or_solid` (indexed.cpp) replaces the
+  textured attempt plus `sat_draw_polygon_quad3` in the flush. When every
+  corner clears the near plane the near clip returns the quad unchanged, so
+  the fallback screen-clips the sprite's own projection: same output, one
+  depth test and one projection instead of two.
+- The castle loop no longer calls `sat_wait_vblank` before each frame. In
+  `SAT_VDP1_FRAME_ON_SUBMIT` mode `sat_end_frame` already waits for the
+  previous swap. Late swaps rise (about 20 to 45 per route) because a list
+  submitted just before a VBlank is shown one field later; draw waits and
+  timeouts stay zero.
+
+Remaining fallback emission is still ~26–29 ms per draw. Subdividing large
+near-camera textured faces would remove both that cost and the untextured
+ground, and is the larger remaining lever beside Slave SH-2 preparation of
+the castle chunks (24–29 ms).

@@ -3,7 +3,7 @@ set -eu
 root=$(CDPATH= cd "$(dirname "$0")" && pwd)
 cd "$root"
 rom=${1:-$root/private/sm64ds_usa.nds}
-sdk=${LIBSATURN_PREFIX:-$root/../saturn-prefix-gc}
+sdk=${LIBSATURN_PREFIX:-$root/../saturn-prefix}
 source=${LIBSATURN_SOURCE:-$root/../lib-saturn}
 compiler=${LIBSATURN_TOOLCHAIN_ROOT:-$root/../saturn-tools/bin}
 python3 tools/prepare_intro.py --rom "$rom" --out private/intro
