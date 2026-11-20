@@ -49,6 +49,7 @@ endif()
 
 option(SM64DS_BUILD_CASTLE "Build the playable castle exterior" OFF)
 set(SM64DS_CASTLE_1F_DIR "" CACHE PATH "Optional generated directory for Castle 1F interior (packaged as C1F.BIN)")
+set(SM64DS_INTRO_DIR "" CACHE PATH "Optional generated directory for SM64DS intro (packaged as 0.BIN)")
 option(SM64DS_VISUAL_DIAGNOSTICS "Enable deterministic visual diagnostic controls" OFF)
 set(SM64DS_DIAG_OBJECTS "15" CACHE STRING "Diagnostic object mask: sky=1, castle=2, body=4, head=8")
 set(SM64DS_DIAG_CLIP "0" CACHE STRING "Diagnostic frozen clip index")
@@ -101,13 +102,25 @@ if(SM64DS_BUILD_CASTLE)
     set(SM64DS_DIAG_EFFECTIVE_FACE_FIRST "0")
     set(SM64DS_DIAG_EFFECTIVE_FACE_COUNT "CASTLE_FACE_COUNT")
   endif()
-  add_executable(sm64ds_castle src/castle.c runtime/sm64ds_play.c
+  set(_castle_sources
+    src/castle.c runtime/sm64ds_play.c
     runtime/sm64ds_pose.c runtime/sm64ds_background.c runtime/sm64ds_painter.c
     "${SM64DS_GENERATED_DIR}/mario_preview.c"
     "${SM64DS_GENERATED_DIR}/castle_scene.c"
     "${SM64DS_GENERATED_DIR}/mario_head.c"
     "${SM64DS_GENERATED_DIR}/skybox_preview.c")
-  target_include_directories(sm64ds_castle PRIVATE runtime "${SM64DS_GENERATED_DIR}")
+  set(_castle_includes runtime "${SM64DS_GENERATED_DIR}")
+  if(EXISTS "${SM64DS_GENERATED_DIR}/lakitu_actor.c")
+    list(APPEND _castle_sources
+      "${SM64DS_GENERATED_DIR}/lakitu_actor.c"
+      "${SM64DS_GENERATED_DIR}/warp_pipe.c"
+      "${SM64DS_GENERATED_DIR}/castle_intro_sfx.c")
+  endif()
+  if(SM64DS_INTRO_DIR AND EXISTS "${SM64DS_INTRO_DIR}/intro_audio_meta.h")
+    list(APPEND _castle_includes "${SM64DS_INTRO_DIR}")
+  endif()
+  add_executable(sm64ds_castle ${_castle_sources})
+  target_include_directories(sm64ds_castle PRIVATE ${_castle_includes})
   target_compile_definitions(sm64ds_castle PRIVATE
     SM64DS_VISUAL_DIAGNOSTICS=$<BOOL:${SM64DS_VISUAL_DIAGNOSTICS}>
     SM64DS_DIAG_OBJECTS=${SM64DS_DIAG_OBJECTS}
@@ -181,7 +194,45 @@ if(SM64DS_BUILD_CASTLE)
     list(APPEND _castle_disc_root_files "${_c1f_bin}")
     list(APPEND _castle_disc_deps sm64ds_castle_1f_stage_bin)
   endif()
-  libsaturn_add_disc(sm64ds_castle NAME sm64ds_castle
-    ROOT_FILES ${_castle_disc_root_files}
-    DEPENDS ${_castle_disc_deps})
+  if(SM64DS_INTRO_DIR AND EXISTS "${SM64DS_INTRO_DIR}/mario_face.c")
+    add_executable(sm64ds_intro
+      src/intro.c
+      runtime/sm64ds_pose.c
+      runtime/sm64ds_background.c
+      "${SM64DS_INTRO_DIR}/mario_face.c"
+      "${SM64DS_INTRO_DIR}/intro_star.c"
+      "${SM64DS_INTRO_DIR}/peach_actor.c"
+      "${SM64DS_INTRO_DIR}/intro_2d.c"
+      "${SM64DS_INTRO_DIR}/intro_audio.c")
+    target_include_directories(sm64ds_intro PRIVATE runtime "${SM64DS_INTRO_DIR}")
+    target_link_libraries(sm64ds_intro PRIVATE LibSaturn::Saturn)
+    libsaturn_configure_executable(sm64ds_intro)
+    libsaturn_add_binary(sm64ds_intro)
+
+    set(_intro_audio_dir "${SM64DS_INTRO_DIR}/disc_audio")
+    set(_ext_bin "${CMAKE_CURRENT_BINARY_DIR}/EXT.BIN")
+    add_custom_command(OUTPUT "${_ext_bin}"
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CMAKE_CURRENT_BINARY_DIR}/sm64ds_castle.app.bin" "${_ext_bin}"
+      DEPENDS sm64ds_castle
+      COMMENT "Staging EXT.BIN for multi-stage Saturn disc"
+      VERBATIM)
+    add_custom_target(sm64ds_castle_stage_ext DEPENDS "${_ext_bin}")
+
+    # Direct Castle Grounds disc for isolated testing (0.BIN = sm64ds_castle)
+    libsaturn_add_disc(sm64ds_castle NAME sm64ds_castle_direct
+      ROOT_FILES ${_castle_disc_root_files}
+      ROOT_DIRS "${_intro_audio_dir}"
+      DEPENDS ${_castle_disc_deps})
+
+    # Full unified boot-to-gameplay disc (0.BIN = intro -> EXT.BIN <-> C1F.BIN + AUDIO/*.ADX)
+    libsaturn_add_disc(sm64ds_intro NAME sm64ds_castle
+      ROOT_FILES "${_ext_bin}" ${_castle_disc_root_files}
+      ROOT_DIRS "${_intro_audio_dir}"
+      DEPENDS sm64ds_castle_stage_ext ${_castle_disc_deps})
+  else()
+    libsaturn_add_disc(sm64ds_castle NAME sm64ds_castle
+      ROOT_FILES ${_castle_disc_root_files}
+      DEPENDS ${_castle_disc_deps})
+  endif()
 endif()

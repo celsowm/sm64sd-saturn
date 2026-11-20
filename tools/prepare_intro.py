@@ -92,6 +92,45 @@ def _project_star_uvs(model: Model) -> Model:
     )
 
 
+def _quantize_sprites_indexed8(
+    sprites: list[tuple[str, object]]
+) -> tuple[list[int], dict[str, bytes]]:
+    """Pack multiple RGB555 sprites into one shared 256-color CRAM palette (0=transparent)."""
+    color_counts: dict[int, int] = {}
+    for _sym, spr in sprites:
+        for v in spr.pixels:
+            if v & 0x8000:
+                raw = v & 0x7FFF
+                color_counts[raw] = color_counts.get(raw, 0) + 1
+    # Keep top 255 colors; if <= 255 colors, completely lossless!
+    ordered = [c for c, _ in sorted(color_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:255]]
+    palette = [0] + ordered + [0] * (255 - len(ordered))
+    exact = {c: idx + 1 for idx, c in enumerate(ordered)}
+    rgb_cache = [(c & 31, (c >> 5) & 31, (c >> 10) & 31) for c in ordered]
+    nearest_cache: dict[int, int] = {}
+
+    def map_color(raw: int) -> int:
+        if raw in exact:
+            return exact[raw]
+        if raw in nearest_cache:
+            return nearest_cache[raw]
+        r, g, b = raw & 31, (raw >> 5) & 31, (raw >> 10) & 31
+        best_i = 1
+        best_d = 1 << 30
+        for idx, (pr, pg, pb) in enumerate(rgb_cache):
+            d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2
+            if d < best_d:
+                best_d = d
+                best_i = idx + 1
+        nearest_cache[raw] = best_i
+        return best_i
+
+    indexed: dict[str, bytes] = {}
+    for sym, spr in sprites:
+        indexed[sym] = bytes(map_color(v & 0x7FFF) if (v & 0x8000) else 0 for v in spr.pixels)
+    return palette, indexed
+
+
 def _emit_2d_assets(fs: Filesystem, out: Path) -> dict:
     title_spr = render_mario3d_banner(
         fs,
@@ -133,10 +172,13 @@ def _emit_2d_assets(fs: Filesystem, out: Path) -> dict:
         ("intro_banner_start", start_spr),
         ("intro_peach_letter_card", letter_spr),
     ]
+    shared_palette, indexed_pixels = _quantize_sprites_indexed8(sprites)
 
     h_lines = [
         "#pragma once",
         "#include <stdint.h>",
+        "",
+        "extern const uint16_t intro_2d_palette[256u];",
         "",
     ]
     c_lines = [
@@ -144,15 +186,20 @@ def _emit_2d_assets(fs: Filesystem, out: Path) -> dict:
         "",
         "/* Locally generated from a user-provided ROM; not for public distribution. */",
         "",
+        "const uint16_t intro_2d_palette[256u] = {",
+        _fmt_u16_array(shared_palette, 12),
+        "};",
+        "",
     ]
 
     for sym, spr in sprites:
         macro = sym.upper()
+        px = indexed_pixels[sym]
         h_lines.append(f"#define {macro}_W {spr.width}u")
         h_lines.append(f"#define {macro}_H {spr.height}u")
-        h_lines.append(f"extern const uint16_t {sym}_pixels[{spr.width * spr.height}u];")
-        c_lines.append(f"const uint16_t {sym}_pixels[{spr.width * spr.height}u] = {{")
-        c_lines.append(_fmt_u16_array(spr.pixels))
+        h_lines.append(f"extern const uint8_t {sym}_pixels[{len(px)}u];")
+        c_lines.append(f"const uint8_t {sym}_pixels[{len(px)}u] = {{")
+        c_lines.append(_fmt_u8_array(px))
         c_lines.append("};")
         c_lines.append("")
 
@@ -177,7 +224,8 @@ def _emit_2d_assets(fs: Filesystem, out: Path) -> dict:
     (out / "intro_2d.h").write_text("\n".join(h_lines), encoding="ascii")
     (out / "intro_2d.c").write_text("\n".join(c_lines), encoding="ascii")
     return {
-        "sprites": {sym: (spr.width, spr.height, spr.width * spr.height * 2) for sym, spr in sprites},
+        "sprites": {sym: (spr.width, spr.height, len(indexed_pixels[sym])) for sym, spr in sprites},
+        "shared_palette_colors": sum(1 for c in shared_palette[1:] if c != 0),
         "cloud_atlas_bytes": len(clouds.pixels),
     }
 
