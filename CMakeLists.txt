@@ -48,6 +48,7 @@ if(SM64DS_BUILD_SPRITE_FIXTURE)
 endif()
 
 option(SM64DS_BUILD_CASTLE "Build the playable castle exterior" OFF)
+set(SM64DS_CASTLE_1F_DIR "" CACHE PATH "Optional generated directory for Castle 1F interior (packaged as C1F.BIN)")
 option(SM64DS_VISUAL_DIAGNOSTICS "Enable deterministic visual diagnostic controls" OFF)
 set(SM64DS_DIAG_OBJECTS "15" CACHE STRING "Diagnostic object mask: sky=1, castle=2, body=4, head=8")
 set(SM64DS_DIAG_CLIP "0" CACHE STRING "Diagnostic frozen clip index")
@@ -153,5 +154,34 @@ if(SM64DS_BUILD_CASTLE)
   target_link_libraries(sm64ds_castle PRIVATE LibSaturn::Saturn)
   libsaturn_configure_executable(sm64ds_castle)
   libsaturn_add_binary(sm64ds_castle)
-  libsaturn_add_disc(sm64ds_castle NAME sm64ds_castle)
+  set(_castle_disc_root_files "")
+  set(_castle_disc_deps "")
+  if(SM64DS_CASTLE_1F_DIR AND EXISTS "${SM64DS_CASTLE_1F_DIR}/castle_scene.c")
+    add_executable(sm64ds_castle_1f src/castle.c runtime/sm64ds_play.c
+      runtime/sm64ds_pose.c runtime/sm64ds_background.c runtime/sm64ds_painter.c
+      "${SM64DS_CASTLE_1F_DIR}/mario_preview.c"
+      "${SM64DS_CASTLE_1F_DIR}/castle_scene.c"
+      "${SM64DS_CASTLE_1F_DIR}/mario_head.c")
+    target_include_directories(sm64ds_castle_1f PRIVATE runtime "${SM64DS_CASTLE_1F_DIR}")
+    target_compile_definitions(sm64ds_castle_1f PRIVATE
+      SM64DS_VISUAL_DIAGNOSTICS=0
+      SM64DS_DIAG_SHOW_UI=0)
+    target_link_libraries(sm64ds_castle_1f PRIVATE LibSaturn::Saturn)
+    libsaturn_configure_executable(sm64ds_castle_1f)
+    libsaturn_add_binary(sm64ds_castle_1f)
+    libsaturn_add_disc(sm64ds_castle_1f NAME sm64ds_castle_1f)
+    set(_c1f_bin "${CMAKE_CURRENT_BINARY_DIR}/C1F.BIN")
+    add_custom_command(OUTPUT "${_c1f_bin}"
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CMAKE_CURRENT_BINARY_DIR}/sm64ds_castle_1f.app.bin" "${_c1f_bin}"
+      DEPENDS sm64ds_castle_1f
+      COMMENT "Staging C1F.BIN for multi-stage Saturn disc"
+      VERBATIM)
+    add_custom_target(sm64ds_castle_1f_stage_bin DEPENDS "${_c1f_bin}")
+    list(APPEND _castle_disc_root_files "${_c1f_bin}")
+    list(APPEND _castle_disc_deps sm64ds_castle_1f_stage_bin)
+  endif()
+  libsaturn_add_disc(sm64ds_castle NAME sm64ds_castle
+    ROOT_FILES ${_castle_disc_root_files}
+    DEPENDS ${_castle_disc_deps})
 endif()

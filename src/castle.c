@@ -1,4 +1,4 @@
-/* Playable local-ROM castle grounds prototype. No render LOD in collision. */
+/* Playable local-ROM castle prototype (exterior + interior 1F). No render LOD in collision. */
 #include <saturn/app.h>
 #include <saturn/input.h>
 #include <saturn/scene.h>
@@ -7,6 +7,8 @@
 #include <saturn/font.h>
 #include <saturn/vdp1.h>
 #include <saturn/time.h>
+#include <saturn/cd_mount.h>
+#include <saturn/exec.h>
 #include <limits.h>
 #include "sm64ds_pose.h"
 #include "sm64ds_background.h"
@@ -15,7 +17,52 @@
 #include "mario_preview.h"
 #include "mario_head.h"
 #include "castle_scene.h"
+#ifndef SM64DS_VISUAL_DIAGNOSTICS
+#define SM64DS_VISUAL_DIAGNOSTICS 0
+#endif
+#ifndef SM64DS_DIAG_OBJECTS
+#define SM64DS_DIAG_OBJECTS 15
+#endif
+#ifndef SM64DS_DIAG_WALL_FIXTURE
+#define SM64DS_DIAG_WALL_FIXTURE 0
+#endif
+#ifndef SM64DS_DIAG_FACE_IDS
+#define SM64DS_DIAG_FACE_IDS 0
+#endif
+#ifndef SM64DS_DIAG_CASTLE_FACE_IDS
+#define SM64DS_DIAG_CASTLE_FACE_IDS 0
+#endif
+#ifndef SM64DS_DIAG_SOLID
+#define SM64DS_DIAG_SOLID 0
+#endif
+#ifndef SM64DS_DIAG_FAR_DEPTH_COUNT
+#define SM64DS_DIAG_FAR_DEPTH_COUNT 0
+#endif
+#ifndef SM64DS_DIAG_SHOW_UI
+#define SM64DS_DIAG_SHOW_UI 0
+#endif
+#ifndef CASTLE_HAS_SKYBOX
+#define CASTLE_HAS_SKYBOX 1
+#endif
+#ifndef CASTLE_STAGE_ID
+#define CASTLE_STAGE_ID 0u
+#endif
+#ifndef CASTLE_SPAWN_X
+#define CASTLE_SPAWN_X 0
+#define CASTLE_SPAWN_Y (100*SAT_FX16_ONE)
+#define CASTLE_SPAWN_Z (256*SAT_FX16_ONE)
+#define CASTLE_SPAWN_FLOOR_CEILING (512*SAT_FX16_ONE)
+#define CASTLE_SPAWN_YAW 0
+#define CASTLE_SPAWN_FACING 180
+#define CASTLE_DEFAULT_CAM_DIST 65
+#define CASTLE_CLOSE_CAM_DIST 35
+#define CASTLE_BG_R 12
+#define CASTLE_BG_G 20
+#define CASTLE_BG_B 30
+#endif
+#if CASTLE_HAS_SKYBOX
 #include "skybox_preview.h"
+#endif
 
 #define ONE SAT_FX16_ONE
 #define N MARIO_PREVIEW_VERTEX_COUNT
@@ -25,9 +72,13 @@
 #define CN CASTLE_VERTEX_COUNT
 #define CF CASTLE_FACE_COUNT
 #define CT CASTLE_TEXTURE_COUNT
+#if CASTLE_HAS_SKYBOX
 #define BN SKYBOX_PREVIEW_VERTEX_COUNT
 #define BF SKYBOX_PREVIEW_FACE_COUNT
 #define BT SKYBOX_PREVIEW_TEXTURE_COUNT
+#else
+#define BF 0u
+#endif
 #define HN MARIO_HEAD_VERTEX_COUNT
 #define HF MARIO_HEAD_FACE_COUNT
 #define HT MARIO_HEAD_TEXTURE_COUNT
@@ -35,10 +86,22 @@
 #define SN CASTLE_SIGN_VERTEX_COUNT
 #define SF CASTLE_SIGN_FACE_COUNT
 #define ST CASTLE_SIGN_TEXTURE_COUNT
-#define PROP_CAP (CASTLE_TREE_COUNT + CASTLE_SIGN_COUNT * SF)
+#define EXT_PROP_CAP (CASTLE_TREE_COUNT + CASTLE_SIGN_COUNT * SF)
 #else
-#define PROP_CAP 0u
+#define EXT_PROP_CAP 0u
 #endif
+#ifdef CASTLE_INTERIOR_PROPS_AVAILABLE
+#define DN CASTLE_DOOR_VERTEX_COUNT
+#define DF CASTLE_DOOR_FACE_COUNT
+#define DT CASTLE_DOOR_TEXTURE_COUNT
+#define TN CASTLE_TOAD_VERTEX_COUNT
+#define TF CASTLE_TOAD_FACE_COUNT
+#define TT CASTLE_TOAD_TEXTURE_COUNT
+#define INT_PROP_CAP (CASTLE_PAINTING_COUNT + CASTLE_DOOR_COUNT * DF + 2u * TF)
+#else
+#define INT_PROP_CAP 0u
+#endif
+#define PROP_CAP (EXT_PROP_CAP + INT_PROP_CAP)
 #define CAP (F+CF+BF+HF+1u+PROP_CAP+(SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_WALL_FIXTURE ? 1 : 0))
 
 static sat_vec3_t vertices[N],world_vertices[N];
@@ -63,7 +126,11 @@ static sat_scene3d_face_t faces[CAP] __attribute__((section(".wram_l"),aligned(4
 #if !SM64DS_VISUAL_DIAGNOSTICS
 static sat_scene3d_projected_face_t projected_faces[CAP] __attribute__((section(".wram_l"),aligned(4)));
 static sat_scene3d_material_program_t castle_prog_entries[CT*2] __attribute__((section(".wram_l"),aligned(4)));
+#if CASTLE_HAS_SKYBOX
 static sat_scene3d_material_program_t sky_prog_entries[BT] __attribute__((section(".wram_l"),aligned(4)));
+static sat_scene3d_material_programs_t sky_programs;
+static sat_scene3d_instance_binding_t sky_binding;
+#endif
 static sat_scene3d_material_program_t actor_prog_entries[T] __attribute__((section(".wram_l"),aligned(4)));
 static sat_scene3d_material_program_t head_prog_entries[HT] __attribute__((section(".wram_l"),aligned(4)));
 #ifdef CASTLE_PROPS_AVAILABLE
@@ -71,23 +138,51 @@ static sat_scene3d_material_program_t sign_prog_entries[ST] __attribute__((secti
 static sat_scene3d_material_programs_t sign_programs;
 static sat_scene3d_instance_binding_t sign_binding;
 #endif
-static sat_scene3d_material_programs_t castle_programs,sky_programs,actor_programs,head_programs;
-static sat_scene3d_instance_binding_t castle_binding,sky_binding,actor_binding,head_binding;
+#ifdef CASTLE_INTERIOR_PROPS_AVAILABLE
+static sat_scene3d_material_program_t door_prog_entries[DT] __attribute__((section(".wram_l"),aligned(4)));
+static sat_scene3d_material_programs_t door_programs;
+static sat_scene3d_instance_binding_t door_binding;
+static sat_scene3d_material_program_t toad_prog_entries[TT] __attribute__((section(".wram_l"),aligned(4)));
+static sat_scene3d_material_programs_t toad_programs;
+static sat_scene3d_instance_binding_t toad_binding;
+#endif
+static sat_scene3d_material_programs_t castle_programs,actor_programs,head_programs;
+static sat_scene3d_instance_binding_t castle_binding,actor_binding,head_binding;
+#ifdef CASTLE_ROOM_CULLING
+static sat_scene3d_instance_binding_t room_bindings[CASTLE_ROOM_COUNT];
+#endif
 #endif
 static uint32_t keys[CAP];
 static uint16_t order[CAP];
 static sat_scene_t scene;
 static sat_ascii_font_t font;
-static sm64ds_background_t castle,sky;
-static sat_vec3_t cv[CN],cw[CN],bv[BN],bw[BN];
-static uint16_t ci[CF*4],cm[CF],bi[BF*4],bm[BF];
+static sm64ds_background_t castle;
+#ifdef CASTLE_ROOM_CULLING
+static sat_mesh_t room_meshes[CASTLE_ROOM_COUNT];
+static sat_scene3d_instance_t room_instances[CASTLE_ROOM_COUNT];
+static uint8_t current_room=0;
+static uint8_t visible_room_mask=1u;
+static uint8_t hud_rooms_drawn=1u;
+#endif
+static sat_vec3_t cw[CN];
+/* Static castle geometry buffers are copied once at init; keep them in Low
+ * WRAM alongside ct/cmat so subdivided interiors retain generous High WRAM. */
+static sat_vec3_t cv[CN] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t ci[CF*4] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t cm[CF] __attribute__((section(".wram_l"),aligned(4)));
+#if CASTLE_HAS_SKYBOX
+static sm64ds_background_t sky;
+static sat_vec3_t bv[BN],bw[BN];
+static uint16_t bi[BF*4],bm[BF];
+static sat_vdp1_texture_t bt[BT];
+static sat_scene3d_material_t bmat[BT];
+static sat_projected_vertex_t bp[BN];
+#endif
 /* Resident castle bindings are initialized once. Keep them in stock Low
  * WRAM so corrected material wrapping and detailed actor bakes fit High RAM. */
 static sat_vdp1_texture_t ct[CT] __attribute__((section(".wram_l"),aligned(4)));
 static sat_scene3d_material_t cmat[CT*2] __attribute__((section(".wram_l"),aligned(4)));
-static sat_vdp1_texture_t bt[BT];
-static sat_scene3d_material_t bmat[BT];
-static sat_projected_vertex_t cp[CN],bp[BN];
+static sat_projected_vertex_t cp[CN];
 static sm64ds_background_t head;
 static sat_vec3_t hv[HN],hw[HN];
 static uint16_t hi[HF*4],hm[HF];
@@ -122,6 +217,43 @@ static sat_scene3d_material_t smat[ST];
 static sat_projected_vertex_t sp[SN];
 static sat_mat4_t sign_worlds[CASTLE_SIGN_COUNT];
 #endif
+#ifdef CASTLE_INTERIOR_PROPS_AVAILABLE
+static sat_vdp1_texture_t painting_textures[CASTLE_PAINTING_TEXTURE_COUNT];
+static sat_scene3d_material_t painting_materials[CASTLE_PAINTING_TEXTURE_COUNT];
+static sm64ds_background_t door_prop;
+static sat_vec3_t dv[DN],dw[DN];
+static uint16_t di[DF*4],dm[DF];
+static sat_vdp1_texture_t dt[DT];
+static sat_scene3d_material_t dmat[DT];
+static sat_projected_vertex_t dp[DN];
+static sat_mat4_t door_worlds[CASTLE_DOOR_COUNT];
+static sm64ds_background_t toad_prop;
+static sat_vec3_t tv[TN],tw[TN];
+static uint16_t ti[TF*4],tm[TF];
+static sat_vdp1_texture_t tt[TT];
+static sat_scene3d_material_t tmat[TT];
+static sat_projected_vertex_t tp[TN];
+static sat_mat4_t toad_worlds[CASTLE_TOAD_COUNT];
+static uint16_t hud_paintings_drawn=0,hud_doors_drawn=0,hud_toads_drawn=0;
+#endif
+#if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+typedef struct {
+    uint32_t magic;
+    uint8_t entrance;
+    uint8_t hud_mode;
+    uint8_t close_camera;
+    uint8_t reserved;
+} sm64ds_warp_arg_t;
+#define SM64DS_WARP_MAGIC 0x534D3634u
+/* Must stay in High WRAM (not .wram_l) because sat_exec stages in Low WRAM. */
+static sat_cd_block_t cd_block;
+static sat_cd_device_t cd_device;
+static sat_cdfs_volume_t cd_volume;
+static uint8_t warp_fade=0;
+static uint8_t warp_target_entrance=0;
+#endif
+static int spawn_yaw_default=CASTLE_SPAWN_YAW;
+static int spawn_facing_default=CASTLE_SPAWN_FACING;
 static sm64ds_player_t player;
 static sat_camera3d_t camera;
 static int yaw=0,camera_yaw=0,paused=0,facing=180,close_camera=0;
@@ -841,7 +973,12 @@ static void skin(void) {
     SAT_PANIC_IF_ERROR(sat_skin_update_mesh(&mario_preview_skin,bones,J,&mesh,0,&bounds));
 }
 static void reset(void) {
-    sm64ds_player_reset(&player);yaw=0;camera_yaw=0;camera_choice=0;facing=180;anim_time=0;
+    sm64ds_player_reset(&player);
+    yaw=spawn_yaw_default;camera_yaw=spawn_yaw_default;camera_choice=0;
+    facing=spawn_facing_default;anim_time=0;
+#ifdef CASTLE_ROOM_CULLING
+    current_room=0;visible_room_mask=1u;
+#endif
 }
 static sat_vec3_t camera_candidate(int angle,int32_t distance) {
     int32_t s=sat_sin_deg(angle*ONE),c=sat_cos_deg(angle*ONE);
@@ -863,7 +1000,7 @@ static void update_camera(void) {
 #if SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FIXED_CAMERA
     int32_t distance=SM64DS_DIAG_CAMERA_DISTANCE*ONE;
 #else
-    int32_t distance=(close_camera?35:65)*ONE;
+    int32_t distance=(close_camera?CASTLE_CLOSE_CAM_DIST:CASTLE_DEFAULT_CAM_DIST)*ONE;
 #endif
     sat_vec3_t candidates[8];int32_t fractions[8]={0},clearance[8]={0};
     candidates[0]=camera_candidate(yaw,distance);
@@ -1012,6 +1149,175 @@ static void submit_castle_props(void) {
 }
 #endif
 
+#ifdef CASTLE_ROOM_CULLING
+static void update_visible_rooms(void) {
+    const int32_t px=player.feet.x,py=player.feet.y+6*ONE,pz=player.feet.z;
+    const int32_t pad=4*ONE;
+    int best=-1;
+    int64_t best_vol=INT64_MAX;
+    /* In Castle 1F, the basement corridor (r4) passes directly underneath the
+     * main lobby (r0) with a smaller AABB. Keep r0 active whenever Mario is on
+     * or above the lobby floor inside r0's bounds. */
+    int in_r0=(px>=castle_room_min[0].x && px<=castle_room_max[0].x &&
+               py>=castle_room_min[0].y && py<=castle_room_max[0].y &&
+               pz>=castle_room_min[0].z && pz<=castle_room_max[0].z);
+    if (in_r0 && player.feet.y>=-6*ONE && (pz>=-66*ONE || player.feet.y>=24*ONE)) {
+        best=0;
+    } else {
+        for (uint8_t r=0;r<CASTLE_ROOM_COUNT;++r) {
+            if (px>=castle_room_min[r].x && px<=castle_room_max[r].x &&
+                py>=castle_room_min[r].y && py<=castle_room_max[r].y &&
+                pz>=castle_room_min[r].z && pz<=castle_room_max[r].z) {
+                int64_t dx=(int64_t)(castle_room_max[r].x-castle_room_min[r].x)>>12;
+                int64_t dy=(int64_t)(castle_room_max[r].y-castle_room_min[r].y)>>12;
+                int64_t dz=(int64_t)(castle_room_max[r].z-castle_room_min[r].z)>>12;
+                int64_t vol=dx*dy*dz;
+                if (vol<best_vol) { best_vol=vol;best=(int)r; }
+            }
+        }
+    }
+    if (best>=0) {
+        current_room=(uint8_t)best;
+    } else if (current_room>=CASTLE_ROOM_COUNT ||
+               px<castle_room_min[current_room].x-pad || px>castle_room_max[current_room].x+pad ||
+               py<castle_room_min[current_room].y-pad || py>castle_room_max[current_room].y+pad ||
+               pz<castle_room_min[current_room].z-pad || pz>castle_room_max[current_room].z+pad) {
+        /* Fallback to nearest room AABB when standing in an archway gap. */
+        int64_t best_d2=INT64_MAX;
+        for (uint8_t r=0;r<CASTLE_ROOM_COUNT;++r) {
+            int32_t cx=px<castle_room_min[r].x?castle_room_min[r].x:(px>castle_room_max[r].x?castle_room_max[r].x:px);
+            int32_t cy=py<castle_room_min[r].y?castle_room_min[r].y:(py>castle_room_max[r].y?castle_room_max[r].y:py);
+            int32_t cz=pz<castle_room_min[r].z?castle_room_min[r].z:(pz>castle_room_max[r].z?castle_room_max[r].z:pz);
+            int64_t dx=(px-cx)>>8,dy=(py-cy)>>8,dz=(pz-cz)>>8;
+            int64_t d2=dx*dx+dy*dy+dz*dz;
+            if (d2<best_d2) { best_d2=d2;current_room=r; }
+        }
+    }
+
+    uint8_t mask=(uint8_t)(1u<<current_room);
+    sat_vec3_t fwd={camera.target.x-camera.eye.x,0,camera.target.z-camera.eye.z};
+    sat_vec3_normalize(&fwd,&fwd);
+    sat_vec3_t right={-fwd.z,0,fwd.x};
+    uint8_t drawn=1u;
+#if defined(CASTLE_PORTAL_COUNT) && CASTLE_PORTAL_COUNT > 0
+    /* Open an adjacent room only through an actual doorway portal connecting it
+     * to current_room when Mario is near the doorway and looking toward it. */
+    const int32_t max_reach=(current_room==0u)?(56*ONE):(96*ONE);
+    const int32_t portal_py=player.feet.y+8*ONE;
+    const int32_t max_pdy=player.grounded?(10*ONE):(18*ONE);
+    for (uint32_t p=0;p<CASTLE_PORTAL_COUNT;++p) {
+        uint8_t ra=castle_portal_room_a[p],rb=castle_portal_room_b[p];
+        uint8_t other;
+        if (ra==current_room) other=rb;
+        else if (rb==current_room) other=ra;
+        else continue;
+        if (other>=CASTLE_ROOM_COUNT || (mask&(1u<<other))) continue;
+        const sat_vec3_t pos=castle_portal_pos[p];
+        int32_t pdx=sat_fx16_abs(px-pos.x);
+        int32_t pdy=sat_fx16_abs(portal_py-pos.y);
+        int32_t pdz=sat_fx16_abs(pz-pos.z);
+        if (pdy>max_pdy) continue;
+        int open=0;
+        if (pdx<=24*ONE && pdz<=24*ONE) {
+            /* Always keep the adjacent room live while straddling its doorway. */
+            open=1;
+        } else if (pdx<=max_reach && pdz<=max_reach) {
+            int32_t dx=pos.x-camera.eye.x,dz=pos.z-camera.eye.z;
+            int32_t depth=sat_fx16_mul(dx,fwd.x)+sat_fx16_mul(dz,fwd.z);
+            int32_t lat=sat_fx16_mul(dx,right.x)+sat_fx16_mul(dz,right.z);
+            int32_t cone=(depth>0?(depth*7)/8:0)+22*ONE;
+            if (depth>-12*ONE && sat_fx16_abs(lat)<=cone) open=1;
+        }
+        if (open) {
+            mask|=(uint8_t)(1u<<other);
+            ++drawn;
+        }
+    }
+#else
+    uint8_t adj=castle_room_adj[current_room];
+    for (uint8_t r=0;r<CASTLE_ROOM_COUNT;++r) {
+        if (r==current_room || !(adj&(1u<<r))) continue;
+        int32_t cx=px<castle_room_min[r].x?castle_room_min[r].x:(px>castle_room_max[r].x?castle_room_max[r].x:px);
+        int32_t cy=py<castle_room_min[r].y?castle_room_min[r].y:(py>castle_room_max[r].y?castle_room_max[r].y:py);
+        int32_t cz=pz<castle_room_min[r].z?castle_room_min[r].z:(pz>castle_room_max[r].z?castle_room_max[r].z:pz);
+        int32_t pdx=sat_fx16_abs(px-cx),pdy=sat_fx16_abs(py-cy),pdz=sat_fx16_abs(pz-cz);
+        if (pdx>112*ONE || pdy>64*ONE || pdz>112*ONE) continue;
+        int32_t max_depth=INT32_MIN;
+        int32_t min_lat=INT32_MAX,max_lat=INT32_MIN;
+        const int32_t xs[2]={castle_room_min[r].x,castle_room_max[r].x};
+        const int32_t zs[2]={castle_room_min[r].z,castle_room_max[r].z};
+        for (int ix=0;ix<2;++ix) for (int iz=0;iz<2;++iz) {
+            int32_t dx=xs[ix]-camera.eye.x,dz=zs[iz]-camera.eye.z;
+            int32_t depth=sat_fx16_mul(dx,fwd.x)+sat_fx16_mul(dz,fwd.z);
+            int32_t lat=sat_fx16_mul(dx,right.x)+sat_fx16_mul(dz,right.z);
+            if (depth>max_depth) max_depth=depth;
+            if (lat<min_lat) min_lat=lat;
+            if (lat>max_lat) max_lat=lat;
+        }
+        if (max_depth<0) continue;
+        int32_t cone=(max_depth*3)/4+24*ONE;
+        if (max_lat<-cone || min_lat>cone) continue;
+        mask|=(uint8_t)(1u<<r);
+        ++drawn;
+    }
+#endif
+    visible_room_mask=mask;
+    hud_rooms_drawn=drawn;
+}
+#endif
+
+#ifdef CASTLE_INTERIOR_PROPS_AVAILABLE
+static void submit_interior_props(void) {
+    hud_paintings_drawn=0;hud_doors_drawn=0;hud_toads_drawn=0;
+    sat_vec3_t fwd={camera.target.x-camera.eye.x,0,camera.target.z-camera.eye.z};
+    sat_vec3_normalize(&fwd,&fwd);
+    if (!fwd.x && !fwd.z) return;
+    sat_vec3_t right={-fwd.z,0,fwd.x};
+
+    for (uint32_t i=0;i<CASTLE_PAINTING_COUNT;++i) {
+#ifdef CASTLE_ROOM_CULLING
+        if (!(visible_room_mask&(1u<<castle_painting_rooms[i]))) continue;
+#endif
+        const sat_quad3_t *q=&castle_painting_quads[i];
+        int32_t cx=(q->v[0].x+q->v[2].x)>>1,cz=(q->v[0].z+q->v[2].z)>>1;
+        int32_t dx=cx-camera.eye.x,dz=cz-camera.eye.z;
+        int32_t depth=sat_fx16_mul(dx,fwd.x)+sat_fx16_mul(dz,fwd.z);
+        if (depth<-24*ONE) continue;
+        uint8_t ti_idx=castle_painting_tex_indices[i];
+        SAT_PANIC_IF_ERROR(sat_scene_submit_quad(&scene,q,&painting_materials[ti_idx],SM64DS_ACTOR_PASS));
+        ++hud_paintings_drawn;
+    }
+    for (uint32_t i=0;i<CASTLE_DOOR_COUNT;++i) {
+#ifdef CASTLE_ROOM_CULLING
+        if (!(visible_room_mask&(1u<<castle_door_rooms[i]))) continue;
+#endif
+        const sat_vec3_t pos=castle_door_positions[i];
+        int32_t dx=pos.x-camera.eye.x,dz=pos.z-camera.eye.z;
+        int32_t depth=sat_fx16_mul(dx,fwd.x)+sat_fx16_mul(dz,fwd.z);
+        if (depth<-12*ONE || depth>360*ONE) continue;
+        int32_t lat=sat_fx16_mul(dx,right.x)+sat_fx16_mul(dz,right.z);
+        if (sat_fx16_abs(lat)>(depth>0?depth:0)+32*ONE) continue;
+        door_prop.world=door_worlds[i];
+        SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&door_prop.instance,SAT_SCENE3D_SLOT_INHERIT,dp,dw));
+        ++hud_doors_drawn;
+    }
+    for (uint32_t i=0;i<CASTLE_TOAD_COUNT;++i) {
+#ifdef CASTLE_ROOM_CULLING
+        if (!(visible_room_mask&(1u<<castle_toad_rooms[i]))) continue;
+#endif
+        const sat_vec3_t pos=castle_toad_positions[i];
+        int32_t dx=pos.x-camera.eye.x,dz=pos.z-camera.eye.z;
+        int32_t depth=sat_fx16_mul(dx,fwd.x)+sat_fx16_mul(dz,fwd.z);
+        if (depth<2*ONE || depth>280*ONE) continue;
+        int32_t lat=sat_fx16_mul(dx,right.x)+sat_fx16_mul(dz,right.z);
+        if (sat_fx16_abs(lat)>depth+16*ONE) continue;
+        toad_prop.world=toad_worlds[i];
+        SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&toad_prop.instance,SAT_SCENE3D_SLOT_INHERIT,tp,tw));
+        ++hud_toads_drawn;
+    }
+}
+#endif
+
 #if !SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)
 /* Push walkable terrain planes that lie strictly beneath Mario and the camera
  * behind Mario's farthest painter depth so sloped hills cannot sort over him. */
@@ -1061,19 +1367,29 @@ static void order_support_behind_actor(uint16_t castle_first,uint16_t castle_end
     if (ax0>ax1 || ay0>ay1) return;
 
     for (uint32_t scan=0;scan<CASTLE_SUPPORT_PLANE_COUNT;++scan) {
+#ifdef CASTLE_ROOM_CULLING
+        uint8_t sroom=castle_support_rooms[scan];
+        if (!(visible_room_mask&(1u<<sroom))) continue;
+        uint16_t vbase=castle_room_vfirst[sroom];
+#else
+        const uint16_t vbase=0u;
+#endif
         uint32_t f=castle_support_faces[scan];
         if (f>=CF) continue;
         const uint16_t *is=&ci[f*4u];
-        if (cp[is[0]].w<=0 || cp[is[1]].w<=0 || cp[is[2]].w<=0 || cp[is[3]].w<=0) continue;
-        int x0=cp[is[0]].x,x1=x0,y0=cp[is[0]].y,y1=y0;
-        int64_t sum=cp[is[0]].w;
+        const uint16_t i0=(uint16_t)(vbase+is[0]),i1=(uint16_t)(vbase+is[1]),
+                       i2=(uint16_t)(vbase+is[2]),i3=(uint16_t)(vbase+is[3]);
+        if (cp[i0].w<=0 || cp[i1].w<=0 || cp[i2].w<=0 || cp[i3].w<=0) continue;
+        const uint16_t idx[4]={i0,i1,i2,i3};
+        int x0=cp[i0].x,x1=x0,y0=cp[i0].y,y1=y0;
+        int64_t sum=cp[i0].w;
         for (unsigned k=1;k<4;++k) {
-            int px=cp[is[k]].x,py=cp[is[k]].y;
+            int px=cp[idx[k]].x,py=cp[idx[k]].y;
             if (px<x0) x0=px;
             if (px>x1) x1=px;
             if (py<y0) y0=py;
             if (py>y1) y1=py;
-            sum+=cp[is[k]].w;
+            sum+=cp[idx[k]].w;
         }
         if (x1<ax0-2 || x0>ax1+2 || y1<ay0-2 || y0>ay1+2) continue;
         int64_t depth=sum>0?(sum>>6):0;
@@ -1081,7 +1397,7 @@ static void order_support_behind_actor(uint16_t castle_first,uint16_t castle_end
         if ((uint32_t)depth>=actor_max) continue;
 
         const sat_vec3_t n=castle_support_normals[scan];
-        const sat_vec3_t p=cw[is[0]];
+        const sat_vec3_t p=cw[i0];
         int64_t plane=(int64_t)p.x*n.x+(int64_t)p.y*n.y+(int64_t)p.z*n.z;
         int64_t cam_side=(int64_t)camera.eye.x*n.x+(int64_t)camera.eye.y*n.y+
                          (int64_t)camera.eye.z*n.z-plane;
@@ -1099,14 +1415,101 @@ static void order_support_behind_actor(uint16_t castle_first,uint16_t castle_end
             if (sat_scene3d_faces_get(&scene.faces,q,&expanded)!=SAT_OK) continue;
             unsigned k;
             for (k=0;k<4;++k)
-                if (expanded.projected.x[k]!=cp[is[k]].x || expanded.projected.y[k]!=cp[is[k]].y) break;
+                if (expanded.projected.x[k]!=cp[idx[k]].x || expanded.projected.y[k]!=cp[idx[k]].y) break;
             if (k==4) {
-                scene.faces.keys[q]=((uint32_t)group<<24)|actor_max;
+                uint32_t pushed=actor_max<0xfffffcu?actor_max+2u:actor_max;
+                scene.faces.keys[q]=((uint32_t)group<<24)|pushed;
                 ++hud_support_pushed;
                 break;
             }
         }
     }
+    /* Near-clipped horizontal floor/carpet fallback faces (!projected_safe) are
+     * skipped by the unclipped vertex test above because a corner lies behind
+     * the camera. Use their exact 3D world corners to keep floors between the
+     * camera and Mario behind Mario without disturbing distant geometry. */
+    const uint32_t clipped_pushed=((uint32_t)group<<24)|(actor_max<0xfffffcu?actor_max+2u:actor_max);
+    const int32_t sx0=(camera.eye.x<player.feet.x?camera.eye.x:player.feet.x)-12*ONE;
+    const int32_t sx1=(camera.eye.x>player.feet.x?camera.eye.x:player.feet.x)+12*ONE;
+    const int32_t sz0=(camera.eye.z<player.feet.z?camera.eye.z:player.feet.z)-12*ONE;
+    const int32_t sz1=(camera.eye.z>player.feet.z?camera.eye.z:player.feet.z)+12*ONE;
+    for (uint16_t q=castle_first;q<castle_end;++q) {
+        uint32_t qk=scene.faces.keys[q];
+        if ((qk>>24)!=group || (qk&0xffffffu)>=actor_max) continue;
+        sat_scene3d_face_t expanded;
+        if (sat_scene3d_faces_get(&scene.faces,q,&expanded)!=SAT_OK) continue;
+        if (expanded.projected_safe) continue;
+        int32_t min_x=expanded.world.v[0].x,max_x=min_x;
+        int32_t min_y=expanded.world.v[0].y,max_y=min_y;
+        int32_t min_z=expanded.world.v[0].z,max_z=min_z;
+        for (unsigned k=1;k<4;++k) {
+            int32_t wx=expanded.world.v[k].x,wy=expanded.world.v[k].y,wz=expanded.world.v[k].z;
+            if (wx<min_x) min_x=wx;
+            if (wx>max_x) max_x=wx;
+            if (wy<min_y) min_y=wy;
+            if (wy>max_y) max_y=wy;
+            if (wz<min_z) min_z=wz;
+            if (wz>max_z) max_z=wz;
+        }
+        if (max_y-min_y>ONE*2) continue;
+        if (camera.eye.y<=max_y+ONE/4) continue;
+        if (player.feet.y+ONE/2<max_y) continue;
+        if (max_x<sx0 || min_x>sx1 || max_z<sz0 || min_z>sz1) continue;
+        scene.faces.keys[q]=clipped_pushed;
+        ++hud_support_pushed;
+    }
+#if defined(CASTLE_ROOM_CULLING) && defined(CASTLE_FLOOR_DECAL_COUNT)
+    /* Keep room-0 floor decals (Sun Carpet) cleanly over the sunken pit floor
+     * while remaining strictly behind Mario and Mario's shadow when stepped on. */
+    if (CASTLE_FLOOR_DECAL_COUNT>0u && (visible_room_mask&1u)) {
+        const uint16_t vbase=castle_room_vfirst[0];
+        const uint32_t pushed_key=((uint32_t)group<<24)|(actor_max<0xfffffcu?actor_max+2u:actor_max);
+        for (uint32_t d=0;d<CASTLE_FLOOR_DECAL_COUNT;++d) {
+            uint32_t f=castle_floor_decals[d];
+            if (f>=CF) continue;
+            const uint16_t *is=&ci[f*4u];
+            const uint16_t idx[4]={(uint16_t)(vbase+is[0]),(uint16_t)(vbase+is[1]),
+                                   (uint16_t)(vbase+is[2]),(uint16_t)(vbase+is[3])};
+            if (cp[idx[0]].w<=0 || cp[idx[1]].w<=0 || cp[idx[2]].w<=0 || cp[idx[3]].w<=0) continue;
+            int64_t sum=(int64_t)cp[idx[0]].w+cp[idx[1]].w+cp[idx[2]].w+cp[idx[3]].w;
+            int64_t depth=sum>0?(sum>>6):0;
+            if (depth>0xfffffe) depth=0xfffffe;
+            uint32_t expected_key=((uint32_t)group<<24)|(uint32_t)depth;
+            for (uint16_t q=castle_first;q<castle_end;++q) {
+                uint32_t qk=scene.faces.keys[q];
+                if (qk!=expected_key && qk!=pushed_key) continue;
+                sat_scene3d_face_t expanded;
+                if (sat_scene3d_faces_get(&scene.faces,q,&expanded)!=SAT_OK) continue;
+                unsigned k;
+                for (k=0;k<4;++k)
+                    if (expanded.projected.x[k]!=cp[idx[k]].x || expanded.projected.y[k]!=cp[idx[k]].y) break;
+                if (k==4) {
+                    if (qk==pushed_key) {
+                        uint32_t decal_pushed=actor_max<0xfffffdu?actor_max+1u:actor_max;
+                        scene.faces.keys[q]=((uint32_t)group<<24)|decal_pushed;
+                    } else {
+                        /* 49152 in (sum>>6) is ~12 world units: clears the wider
+                         * sunken pit floor strips beneath the Sun Carpet. */
+                        uint32_t biased=depth>49152?(uint32_t)(depth-49152):0u;
+                        if (biased<=actor_max) {
+                            int x0=cp[idx[0]].x,x1=x0,y0=cp[idx[0]].y,y1=y0;
+                            for (unsigned j=1;j<4;++j) {
+                                if (cp[idx[j]].x<x0) x0=cp[idx[j]].x;
+                                if (cp[idx[j]].x>x1) x1=cp[idx[j]].x;
+                                if (cp[idx[j]].y<y0) y0=cp[idx[j]].y;
+                                if (cp[idx[j]].y>y1) y1=cp[idx[j]].y;
+                            }
+                            if (x1>=ax0-2 && x0<=ax1+2 && y1>=ay0-2 && y0<=ay1+2)
+                                biased=actor_max<0xfffffdu?actor_max+1u:actor_max;
+                        }
+                        scene.faces.keys[q]=((uint32_t)group<<24)|biased;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+#endif
 }
 #endif
 
@@ -1233,8 +1636,41 @@ static void draw_debug_hud(const sat_scene_stats_t *stats,uint32_t fps,
 #ifdef CASTLE_PROPS_AVAILABLE
     hud_put_str(&b," T:");hud_put_u32(&b,hud_trees_drawn);
     hud_put_str(&b," S:");hud_put_u32(&b,hud_signs_drawn);
+#elif defined(CASTLE_ROOM_CULLING)
+    hud_put_str(&b," R:");hud_put_u32(&b,current_room);
+    hud_put_str(&b," V:");hud_put_u32(&b,hud_rooms_drawn);
 #endif
     hud_draw_text(2,213,b.data);
+}
+#endif
+
+#if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+static void draw_warp_fade(uint8_t step) {
+    if (step==0u) return;
+    sat_polygon_cmd_t cmd={
+        .x={-160,160,160,-160},
+        .y={-112,-112,112,112},
+        .color=SAT_RGB555(0,0,0),
+        .flags=step<3u?SAT_SPRITE_FLAG_HALF_TRANSPARENT:0u
+    };
+    SAT_PANIC_IF_ERROR(sat_vdp1_draw_polygon(&cmd));
+}
+
+static void execute_stage_warp(uint8_t entrance) {
+    sm64ds_warp_arg_t out_arg={
+        .magic=SM64DS_WARP_MAGIC,
+        .entrance=entrance,
+        .hud_mode=hud_mode,
+        .close_camera=(uint8_t)close_camera,
+        .reserved=0u
+    };
+    sat_result_t r=sat_cd_mount_default(&cd_block,0,0,&cd_device,0u,&cd_volume);
+    if (r==SAT_OK) {
+        (void)sat_exec(&cd_volume,CASTLE_WARP_TARGET_BIN,&out_arg,sizeof(out_arg));
+    }
+    /* If the target binary is absent (e.g. standalone single-stage test disc),
+     * cancel the fade gracefully so gameplay continues uninterrupted. */
+    warp_fade=0u;
 }
 #endif
 
@@ -1245,12 +1681,20 @@ int main(void) {
      * visible until VDP1 reaches END instead of swapping a partial list. */
     SAT_PANIC_IF_ERROR(sat_vdp1_set_frame_mode(SAT_VDP1_FRAME_ON_SUBMIT));
     uint32_t bytes=sat_model_vram_estimate_bytes(&mario_preview_model)+
-        sat_model_vram_estimate_bytes(&castle_model)+sat_model_vram_estimate_bytes(&skybox_preview_model)+
+        sat_model_vram_estimate_bytes(&castle_model)+
         sat_model_vram_estimate_bytes(&mario_head_model)+
         sat_model_vram_estimate_bytes(&shadow_model);
+#if CASTLE_HAS_SKYBOX
+    bytes+=sat_model_vram_estimate_bytes(&skybox_preview_model);
+#endif
 #ifdef CASTLE_PROPS_AVAILABLE
     bytes+=sat_model_vram_estimate_bytes(&castle_tree_model)+
         sat_model_vram_estimate_bytes(&castle_sign_model);
+#endif
+#ifdef CASTLE_INTERIOR_PROPS_AVAILABLE
+    bytes+=sat_model_vram_estimate_bytes(&castle_painting_model)+
+        sat_model_vram_estimate_bytes(&castle_door_model)+
+        sat_model_vram_estimate_bytes(&castle_toad_model);
 #endif
     const uint32_t font_bytes=SAT_ASCII_FONT_GLYPH_COUNT*SAT_ASCII_FONT_GLYPH_WIDTH*SAT_ASCII_FONT_GLYPH_HEIGHT;
     const uint32_t arena_free=sat_vdp1_vram_free_bytes();
@@ -1269,7 +1713,6 @@ int main(void) {
     }
     for(uint16_t i=0;i<F;++i)face_materials[i]=mario_preview_model.face_texture_indices[i];
     const sm64ds_background_buffers_t cb={cv,ci,ct,cmat,cm,CN,CF,CT};
-    const sm64ds_background_buffers_t bb={bv,bi,bt,bmat,bm,BN,BF,BT};
     const sm64ds_background_buffers_t hb={hv,hi,ht,hmat,hm,HN,HF,HT};
     SAT_PANIC_IF_ERROR(sm64ds_background_init(&castle,&castle_model,&cb));
     /* VDP1 indexed sprites cannot blend against another VDP1 sprite. Its
@@ -1284,12 +1727,32 @@ int main(void) {
     for (uint16_t i=0;i<CF;++i)
         if (castle_polygon_alpha[i]<31u) cm[i]=(uint16_t)(cm[i]+CT);
     castle.instance.material_count=CT*2;
+#if CASTLE_HAS_SKYBOX
+    const sm64ds_background_buffers_t bb={bv,bi,bt,bmat,bm,BN,BF,BT};
     SAT_PANIC_IF_ERROR(sm64ds_background_init(&sky,&skybox_preview_model,&bb));
+#endif
     SAT_PANIC_IF_ERROR(sm64ds_background_init(&head,&mario_head_model,&hb));
     head.instance.pass=SM64DS_ACTOR_PASS;head.instance.cull_backfaces=SAT_SCENE3D_CULL_SCREEN;
     castle.instance.pass=SM64DS_ACTOR_PASS;
     castle.instance.cull_backfaces=SAT_SCENE3D_CULL_SCREEN;
     castle.instance.double_sided_faces=castle_double_sided;
+#ifdef CASTLE_ROOM_CULLING
+    for (uint8_t r=0;r<CASTLE_ROOM_COUNT;++r) {
+        uint16_t f0=castle_room_first[r],fc=castle_room_count[r];
+        uint16_t v0=castle_room_vfirst[r],vc=castle_room_vcount[r];
+        for (uint32_t k=(uint32_t)f0*4u;k<(uint32_t)(f0+fc)*4u;++k)
+            ci[k]=(uint16_t)(ci[k]-v0);
+        SAT_PANIC_IF_ERROR(sat_mesh_init(&room_meshes[r],&cv[v0],vc,&ci[(uint32_t)f0*4u],fc));
+        room_meshes[r].vertex_count=vc;
+        room_meshes[r].face_count=fc;
+        room_instances[r]=(sat_scene3d_instance_t){
+            .mesh=&room_meshes[r],.materials=cmat,.material_count=CT*2,
+            .face_materials=&cm[f0],.world=&castle.world,.pass=SM64DS_ACTOR_PASS,
+            .cull_backfaces=SAT_SCENE3D_CULL_SCREEN,
+            .double_sided_faces=&castle_double_sided[f0]
+        };
+    }
+#endif
     actor=(sat_scene3d_instance_t){.mesh=&mesh,.materials=materials,.material_count=T,
         .face_materials=face_materials,.world=&actor_world,.pass=SM64DS_ACTOR_PASS,.cull_backfaces=SAT_SCENE3D_CULL_SCREEN};
     init_shadow_texture();
@@ -1303,13 +1766,46 @@ int main(void) {
     const sm64ds_background_buffers_t sb={sv,si,st,smat,sm,SN,SF,ST};
     SAT_PANIC_IF_ERROR(sm64ds_background_init(&sign_prop,&castle_sign_model,&sb));
     sign_prop.instance.pass=SM64DS_ACTOR_PASS;
-    sign_prop.instance.cull_backfaces=SAT_SCENE3D_CULL_SCREEN;
+    sign_prop.instance.cull_backfaces=0;
     for (uint32_t i=0;i<CASTLE_SIGN_COUNT;++i) {
         sat_model_transform3d_t tr;
         sat_model_transform3d_identity(&tr);
         tr.position=castle_sign_positions[i];
         tr.rotation_deg.y=(int32_t)castle_sign_yaw_deg[i]*ONE;
         SAT_PANIC_IF_ERROR(sat_model_transform3d_matrix(&tr,&sign_worlds[i]));
+    }
+#endif
+#ifdef CASTLE_INTERIOR_PROPS_AVAILABLE
+    SAT_PANIC_IF_ERROR(sat_model_upload_textures(&castle_painting_model,painting_textures,CASTLE_PAINTING_TEXTURE_COUNT));
+    for (uint16_t i=0;i<CASTLE_PAINTING_TEXTURE_COUNT;++i) {
+        painting_materials[i]=(sat_scene3d_material_t){
+            .kind=SAT_SCENE3D_INDEXED_TEXTURED,
+            .rgb555=sm64ds_texture_fallback(&castle_painting_model,i),
+            .texture=&painting_textures[i],
+            .color_calc_slot=SAT_INDEXED_SOLID_OPAQUE
+        };
+    }
+    const sm64ds_background_buffers_t db={dv,di,dt,dmat,dm,DN,DF,DT};
+    SAT_PANIC_IF_ERROR(sm64ds_background_init(&door_prop,&castle_door_model,&db));
+    door_prop.instance.pass=SM64DS_ACTOR_PASS;
+    door_prop.instance.cull_backfaces=SAT_SCENE3D_CULL_SCREEN;
+    for (uint32_t i=0;i<CASTLE_DOOR_COUNT;++i) {
+        sat_model_transform3d_t tr;
+        sat_model_transform3d_identity(&tr);
+        tr.position=castle_door_positions[i];
+        tr.rotation_deg.y=(int32_t)castle_door_yaw_deg[i]*ONE;
+        SAT_PANIC_IF_ERROR(sat_model_transform3d_matrix(&tr,&door_worlds[i]));
+    }
+    const sm64ds_background_buffers_t tb={tv,ti,tt,tmat,tm,TN,TF,TT};
+    SAT_PANIC_IF_ERROR(sm64ds_background_init(&toad_prop,&castle_toad_model,&tb));
+    toad_prop.instance.pass=SM64DS_ACTOR_PASS;
+    toad_prop.instance.cull_backfaces=SAT_SCENE3D_CULL_SCREEN;
+    for (uint32_t i=0;i<CASTLE_TOAD_COUNT;++i) {
+        sat_model_transform3d_t tr;
+        sat_model_transform3d_identity(&tr);
+        tr.position=castle_toad_positions[i];
+        tr.rotation_deg.y=(int32_t)castle_toad_yaw_deg[i]*ONE;
+        SAT_PANIC_IF_ERROR(sat_model_transform3d_matrix(&tr,&toad_worlds[i]));
     }
 #endif
 #if SM64DS_VISUAL_DIAGNOSTICS
@@ -1326,6 +1822,9 @@ int main(void) {
         castle.instance.cull_backfaces=0;
         actor.cull_backfaces=0;
         head.instance.cull_backfaces=0;
+#ifdef CASTLE_ROOM_CULLING
+        for (uint8_t r=0;r<CASTLE_ROOM_COUNT;++r) room_instances[r].cull_backfaces=0;
+#endif
 #ifdef CASTLE_PROPS_AVAILABLE
         sign_prop.instance.cull_backfaces=0;
 #endif
@@ -1371,11 +1870,22 @@ int main(void) {
 #if !SM64DS_VISUAL_DIAGNOSTICS
     SAT_PANIC_IF_ERROR(sat_scene3d_faces_use_projected_storage(&scene.faces,projected_faces,CAP));
     SAT_PANIC_IF_ERROR(sat_scene3d_material_programs_init(&castle_programs,cmat,CT*2,castle_prog_entries,CT*2));
+#ifdef CASTLE_ROOM_CULLING
+    for (uint8_t r=0;r<CASTLE_ROOM_COUNT;++r) {
+        uint16_t f0=castle_room_first[r];
+        SAT_PANIC_IF_ERROR(sat_scene3d_instance_binding_init(&room_bindings[r],&room_meshes[r],cmat,CT*2,&cm[f0]));
+        room_bindings[r].programs=&castle_programs;
+        room_instances[r].validated_binding=&room_bindings[r];
+    }
+#else
     SAT_PANIC_IF_ERROR(sat_scene3d_instance_binding_init(&castle_binding,&castle.mesh,cmat,CT*2,cm));
     castle_binding.programs=&castle_programs;castle.instance.validated_binding=&castle_binding;
+#endif
+#if CASTLE_HAS_SKYBOX
     SAT_PANIC_IF_ERROR(sat_scene3d_material_programs_init(&sky_programs,bmat,BT,sky_prog_entries,BT));
     SAT_PANIC_IF_ERROR(sat_scene3d_instance_binding_init(&sky_binding,&sky.mesh,bmat,BT,bm));
     sky_binding.programs=&sky_programs;sky.instance.validated_binding=&sky_binding;
+#endif
     SAT_PANIC_IF_ERROR(sat_scene3d_material_programs_init(&actor_programs,materials,T,actor_prog_entries,T));
     SAT_PANIC_IF_ERROR(sat_scene3d_instance_binding_init(&actor_binding,&mesh,materials,T,face_materials));
     actor_binding.programs=&actor_programs;actor.validated_binding=&actor_binding;
@@ -1387,20 +1897,41 @@ int main(void) {
     SAT_PANIC_IF_ERROR(sat_scene3d_instance_binding_init(&sign_binding,&sign_prop.mesh,smat,ST,sm));
     sign_binding.programs=&sign_programs;sign_prop.instance.validated_binding=&sign_binding;
 #endif
+#ifdef CASTLE_INTERIOR_PROPS_AVAILABLE
+    SAT_PANIC_IF_ERROR(sat_scene3d_material_programs_init(&door_programs,dmat,DT,door_prog_entries,DT));
+    SAT_PANIC_IF_ERROR(sat_scene3d_instance_binding_init(&door_binding,&door_prop.mesh,dmat,DT,dm));
+    door_binding.programs=&door_programs;door_prop.instance.validated_binding=&door_binding;
+    SAT_PANIC_IF_ERROR(sat_scene3d_material_programs_init(&toad_programs,tmat,TT,toad_prog_entries,TT));
+    SAT_PANIC_IF_ERROR(sat_scene3d_instance_binding_init(&toad_binding,&toad_prop.mesh,tmat,TT,tm));
+    toad_binding.programs=&toad_programs;toad_prop.instance.validated_binding=&toad_binding;
+#endif
 #endif
     SAT_PANIC_IF_ERROR(sat_ascii_font_init_8x8_indexed8(&font,SAT_COLOR_WHITE,0,3));
     g_sm64ds_castle_stats.texture_arena_remaining=sat_vdp1_vram_free_bytes();
-    player.spawn=(sat_vec3_t){0,100*ONE,256*ONE};
+    player.spawn=(sat_vec3_t){CASTLE_SPAWN_X,CASTLE_SPAWN_Y,CASTLE_SPAWN_Z};
+    int32_t spawn_floor_ceiling=CASTLE_SPAWN_FLOOR_CEILING;
+#if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+    sm64ds_warp_arg_t in_arg={0};
+    uint32_t in_arg_len=0;
+    if (sat_exec_arg(&in_arg,sizeof(in_arg),&in_arg_len)==SAT_OK &&
+        in_arg_len==sizeof(in_arg) && in_arg.magic==SM64DS_WARP_MAGIC) {
+        if (in_arg.hud_mode<3u) hud_mode=in_arg.hud_mode;
+        close_camera=in_arg.close_camera?1:0;
+        if (in_arg.entrance==1u) {
+            player.spawn.x=CASTLE_RETURN_SPAWN_X;
+            player.spawn.z=CASTLE_RETURN_SPAWN_Z;
+            spawn_floor_ceiling=CASTLE_RETURN_FLOOR_CEILING;
+            spawn_yaw_default=CASTLE_RETURN_YAW;
+            spawn_facing_default=CASTLE_RETURN_FACING;
+        }
+    }
+#endif
 #if SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FIXED_CAMERA
     player.spawn.x=SM64DS_DIAG_X*ONE;
     player.spawn.z=SM64DS_DIAG_Z*ONE;
+    spawn_floor_ceiling=SM64DS_DIAG_FLOOR_CEILING*ONE;
 #endif
     int32_t floor;
-#if SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FIXED_CAMERA
-    const int32_t spawn_floor_ceiling=SM64DS_DIAG_FLOOR_CEILING*ONE;
-#else
-    const int32_t spawn_floor_ceiling=512*ONE;
-#endif
     if(!sm64ds_floor(&castle_collision,player.spawn.x,player.spawn.z,spawn_floor_ceiling,&floor))
         SAT_PANIC_IF_ERROR(SAT_ERR_INVALID_ARG);
     player.spawn.y=floor;reset();
@@ -1438,11 +1969,35 @@ int main(void) {
         if(pad.pressed&SAT_PAD_C)reset();
         if(pad.pressed&SAT_PAD_X)close_camera=!close_camera;
         if(pad.pressed&SAT_PAD_Y)hud_mode=(uint8_t)((hud_mode+1u)%3u);
+#if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+        if (warp_fade==0u && (pad.held&(SAT_PAD_L|SAT_PAD_R))==(SAT_PAD_L|SAT_PAD_R) &&
+            (pad.pressed&SAT_PAD_Z)) {
+            warp_fade=1u;
+            warp_target_entrance=CASTLE_WARP_TARGET_ENTRANCE;
+        }
+#endif
         jump_pending|=pad.pressed&SAT_PAD_A;
-        if(!paused) {
+        if(!paused
+#if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+           && warp_fade==0u
+#endif
+        ) {
             accumulator+=elapsed*60;
             while(accumulator>=1000) {simulation(&pad,jump_pending!=0);jump_pending=0;accumulator-=1000;}
         } else {accumulator=0;jump_pending=0;}
+#if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+        if (warp_fade==0u && player.ticks>45u &&
+            player.feet.x>=CASTLE_WARP_MIN_X && player.feet.x<=CASTLE_WARP_MAX_X &&
+            player.feet.y>=CASTLE_WARP_MIN_Y && player.feet.y<=CASTLE_WARP_MAX_Y &&
+            player.feet.z>=CASTLE_WARP_MIN_Z && player.feet.z<=CASTLE_WARP_MAX_Z) {
+            warp_fade=1u;
+            warp_target_entrance=CASTLE_WARP_TARGET_ENTRANCE;
+        }
+        if (warp_fade>0u) {
+            ++warp_fade;
+            if (warp_fade>=5u) execute_stage_warp(warp_target_entrance);
+        }
+#endif
 #if SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FIXED_CAMERA
         /* Reproduce the same state even when render cadence changes pad polls. */
         sm64ds_player_reset(&player);
@@ -1490,24 +2045,39 @@ int main(void) {
 #endif
         SAT_PANIC_IF_ERROR(sat_mat4_multiply(&head.world,&actor_world,&bones[15]));
         update_camera();
-        SAT_PANIC_IF_ERROR(sat_set_clear_color(SAT_RGB555(12,20,30)));
+#ifdef CASTLE_ROOM_CULLING
+        update_visible_rooms();
+#endif
+        SAT_PANIC_IF_ERROR(sat_set_clear_color(SAT_RGB555(CASTLE_BG_R,CASTLE_BG_G,CASTLE_BG_B)));
         SAT_PANIC_IF_ERROR(sat_begin_frame());
 #if !SM64DS_VISUAL_DIAGNOSTICS || SM64DS_DIAG_SHOW_UI
-        uint16_t overlay_reserve=hud_mode==0u?180u:(hud_mode==1u?56u:0u);
+        uint16_t overlay_reserve=hud_mode==0u?180u:(hud_mode==1u?56u:4u);
 #else
         uint16_t overlay_reserve=0u;
 #endif
         SAT_PANIC_IF_ERROR(sat_scene_begin(&scene,&camera,camera.near_z,320,224,overlay_reserve));
         uint16_t previous_clipped=scene.faces.clipped_faces;
+#if CASTLE_HAS_SKYBOX
         if (!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&1))
             SAT_PANIC_IF_ERROR(sm64ds_background_submit(&sky,&scene,&camera.eye,bp,bw));
+#endif
         g_sm64ds_castle_stats.sky_clip_candidates=scene.faces.clipped_faces-previous_clipped;
         previous_clipped=scene.faces.clipped_faces;
 #if (!SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)) || (SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FAR_DEPTH_COUNT > 0)
         uint16_t castle_first=scene.faces.count;
 #endif
-        if (!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&2))
+        if (!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&2)) {
+#ifdef CASTLE_ROOM_CULLING
+            for (uint8_t r=0;r<CASTLE_ROOM_COUNT;++r) {
+                if (!(visible_room_mask&(1u<<r))) continue;
+                uint16_t v0=castle_room_vfirst[r];
+                SAT_PANIC_IF_ERROR(sat_scene_submit_instance(
+                    &scene,&room_instances[r],SAT_SCENE3D_SLOT_INHERIT,&cp[v0],&cw[v0]));
+            }
+#else
             SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&castle.instance,SAT_SCENE3D_SLOT_INHERIT,cp,cw));
+#endif
+        }
 #if (!SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)) || (SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FAR_DEPTH_COUNT > 0 && (SM64DS_DIAG_GEOMETRIC_DEPTH || SM64DS_DIAG_PAIR_DEPTH || SM64DS_DIAG_SUPPORT_DEPTH))
         uint16_t castle_end=scene.faces.count;
 #endif
@@ -1535,6 +2105,12 @@ int main(void) {
             ((SM64DS_DIAG_OBJECTS&2) && !SM64DS_DIAG_CASTLE_FACE_IDS && !SM64DS_DIAG_SOLID &&
              SM64DS_DIAG_FAR_DEPTH_COUNT==0))
             submit_castle_props();
+#endif
+#ifdef CASTLE_INTERIOR_PROPS_AVAILABLE
+        if (!SM64DS_VISUAL_DIAGNOSTICS ||
+            ((SM64DS_DIAG_OBJECTS&2) && !SM64DS_DIAG_CASTLE_FACE_IDS && !SM64DS_DIAG_SOLID &&
+             SM64DS_DIAG_FAR_DEPTH_COUNT==0))
+            submit_interior_props();
 #endif
 #if !SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)
         uint16_t shadow_first=scene.faces.count;
@@ -1603,6 +2179,9 @@ int main(void) {
         draw_debug_hud(&stats,fps,avg_ms,avg_cpu_ms,late_delta);
 #else
         (void)avg_ms;(void)avg_cpu_ms;(void)fps;(void)late_delta;
+#endif
+#if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+        draw_warp_fade(warp_fade);
 #endif
         ++g_sm64ds_castle_stats.frames;g_sm64ds_castle_stats.ticks=player.ticks;
         g_sm64ds_castle_stats.jumps=player.jumps;g_sm64ds_castle_stats.landings=player.landings;

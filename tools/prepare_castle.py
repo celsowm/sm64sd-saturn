@@ -11,12 +11,13 @@ from sm64ds_pipeline.cli import main as convert
 from sm64ds_pipeline.kcl import decode_kcl
 from sm64ds_pipeline.skybox import emit_skybox
 from sm64ds_pipeline.textures import bake_face, index_bakes, index_bakes_lut4, BakedTexture
-from sm64ds_pipeline.subdivide import split_large_faces
+from sm64ds_pipeline.subdivide import split_large_faces, split_long_edges
 from sm64ds_pipeline.sdk_split import split_nearby
 from sm64ds_pipeline.quad_merge import merge_coplanar_quads
 from sm64ds_pipeline.adaptive_bake import adaptive_bakes, adaptive_lut4_bakes
 from sm64ds_pipeline.support_planes import support_planes
-from sm64ds_pipeline.level_objects import extract_castle_props
+from sm64ds_pipeline.skinning import rest_world, mv
+from sm64ds_pipeline.level_objects import extract_castle_props, extract_castle_1f_objects
 
 
 def fx(value):
@@ -170,6 +171,213 @@ def _build_castle_props(fs: Filesystem):
     }
 
 
+def _build_castle_1f_props(fs: Filesystem):
+    """Extract Castle 1F course paintings, exit doors, and Toads as compact LUT4 assets."""
+    objs = extract_castle_1f_objects(fs)
+
+    # 1. Course paintings (each is 1 quad + 1 crisp 64x64 LUT4 texture).
+    unique_paths = []
+    path_to_idx = {}
+    painting_bakes = []
+    for p in objs.paintings:
+        if p.model_path not in path_to_idx:
+            path_to_idx[p.model_path] = len(unique_paths)
+            unique_paths.append(p.model_path)
+            pbmd = convert_bmd(fs.read(p.model_path))
+            ptex = pbmd.material_textures[0]
+            if ptex is None:
+                raise ValueError(f'{p.model_path} is missing its texture')
+            uv = ((0.0, 0.0), (float(ptex.width), 0.0),
+                  (float(ptex.width), float(ptex.height)), (0.0, float(ptex.height)))
+            painting_bakes.append(bake_face(ptex, uv, 64, samples=2))
+    ptexs, pluts, plut_cnt, _ = index_bakes_lut4(
+        painting_bakes, groups=list(range(len(painting_bakes)))
+    )
+    painting_bytes = plut_cnt * 32 + sum(len(t.pixels) for t in ptexs)
+
+    # Precompute world-space quad corners (TL, TR, BR, BL) facing +normal into the room.
+    painting_quads = []
+    for p in objs.paintings:
+        rad = math.radians(p.yaw_deg)
+        nx, nz = math.sin(rad), math.cos(rad)
+        rx, rz = math.cos(rad), -math.sin(rad)
+        hw = p.width * 0.5
+        if p.centered_y:
+            y_bot = p.position[1] - p.height * 0.5
+            y_top = p.position[1] + p.height * 0.5
+        else:
+            y_bot = p.position[1]
+            y_top = p.position[1] + p.height
+        cx = p.position[0] + nx * 0.6
+        cz = p.position[2] + nz * 0.6
+        tl = (cx - rx * hw, y_top, cz - rz * hw)
+        tr = (cx + rx * hw, y_top, cz + rz * hw)
+        br = (cx + rx * hw, y_bot, cz + rz * hw)
+        bl = (cx - rx * hw, y_bot, cz - rz * hw)
+        painting_quads.append((tl, tr, br, bl, path_to_idx[p.model_path], p.room))
+
+    # 2. Level-exit 3D doors (obj_door1.bmd at 0.5x actor scale).
+    exit_doors = [d for d in objs.doors if d.is_level_exit]
+    door_bmd = convert_bmd(fs.read('data/normal_obj/door/obj_door1.bmd'))
+    dverts = [tuple(c * (1 << door_bmd.scale_shift) * 0.5 / 4096.0 for c in (v.x, v.y, v.z))
+              for v in door_bmd.vertices]
+    dfaces, duvs, dmats, dcols, _, _ = merge_coplanar_quads(
+        dverts, door_bmd.faces, door_bmd.face_uvs, door_bmd.face_materials, colors=door_bmd.face_colors
+    )
+    dsrcs = [door_bmd.material_textures[mat] for mat in dmats]
+    dareas = [_face_area(dverts, f) for f in dfaces]
+    dtexs, dluts, dlut_cnt, dftexs, _ = adaptive_lut4_bakes(
+        dsrcs, duvs, dmats, colors=dcols, byte_budget=4096, samples=2, face_areas=dareas, max_size=32
+    )
+    door_bytes = dlut_cnt * 32 + sum(len(t.pixels) for t in dtexs)
+
+    # 3. Toad NPCs (kinopio.bmd baked in rest-world pose at 0.5x actor scale).
+    toad_bmd = convert_bmd(fs.read('data/enemy/kinopio/kinopio.bmd'))
+    toad_rw = rest_world(toad_bmd)
+    tverts = []
+    for v in toad_bmd.vertices:
+        pt = tuple(c * (1 << toad_bmd.scale_shift) / 4096.0 for c in (v.x, v.y, v.z))
+        if v.joint < len(toad_bmd.bones):
+            lin, tr = toad_rw[v.joint]
+            pt = tuple(a + b for a, b in zip(mv(lin, pt), tr))
+        tverts.append(tuple(c * 0.5 for c in pt))
+    tfaces, tuvs, tmats, tcols, _, _ = merge_coplanar_quads(
+        tverts, toad_bmd.faces, toad_bmd.face_uvs, toad_bmd.face_materials, colors=toad_bmd.face_colors
+    )
+    tsrcs = [toad_bmd.material_textures[mat] for mat in tmats]
+    tareas = [_face_area(tverts, f) for f in tfaces]
+    ttexs, tluts, tlut_cnt, tftexs, _ = adaptive_lut4_bakes(
+        tsrcs, tuvs, tmats, colors=tcols, byte_budget=10240, samples=2, face_areas=tareas, max_size=24
+    )
+    toad_bytes = tlut_cnt * 32 + sum(len(t.pixels) for t in ttexs)
+
+    h_lines = [
+        '#define CASTLE_INTERIOR_PROPS_AVAILABLE 1',
+        f'#define CASTLE_PAINTING_COUNT {len(painting_quads)}u',
+        f'#define CASTLE_PAINTING_TEXTURE_COUNT {len(ptexs)}u',
+        'extern const sat_model_asset_t castle_painting_model;',
+        'extern const sat_quad3_t castle_painting_quads[CASTLE_PAINTING_COUNT];',
+        'extern const uint8_t castle_painting_tex_indices[CASTLE_PAINTING_COUNT];',
+        'extern const uint8_t castle_painting_rooms[CASTLE_PAINTING_COUNT];',
+        f'#define CASTLE_DOOR_COUNT {len(exit_doors)}u',
+        f'#define CASTLE_DOOR_VERTEX_COUNT {len(dverts)}u',
+        f'#define CASTLE_DOOR_FACE_COUNT {len(dfaces)}u',
+        f'#define CASTLE_DOOR_TEXTURE_COUNT {len(dtexs)}u',
+        'extern const sat_model_asset_t castle_door_model;',
+        'extern const sat_vec3_t castle_door_positions[CASTLE_DOOR_COUNT];',
+        'extern const int16_t castle_door_yaw_deg[CASTLE_DOOR_COUNT];',
+        'extern const uint8_t castle_door_rooms[CASTLE_DOOR_COUNT];',
+        f'#define CASTLE_TOAD_COUNT {len(objs.toads)}u',
+        f'#define CASTLE_TOAD_VERTEX_COUNT {len(tverts)}u',
+        f'#define CASTLE_TOAD_FACE_COUNT {len(tfaces)}u',
+        f'#define CASTLE_TOAD_TEXTURE_COUNT {len(ttexs)}u',
+        'extern const sat_model_asset_t castle_toad_model;',
+        'extern const sat_vec3_t castle_toad_positions[CASTLE_TOAD_COUNT];',
+        'extern const int16_t castle_toad_yaw_deg[CASTLE_TOAD_COUNT];',
+        'extern const uint8_t castle_toad_rooms[CASTLE_TOAD_COUNT];',
+    ]
+
+    c_lines = [
+        'static const sat_vec3_t painting_dummy_verts[4]={{0,0,0},{65536,0,0},{65536,65536,0},{0,65536,0}};',
+        'static const uint16_t painting_dummy_faces[4]={0,1,2,3};',
+        'static const uint16_t painting_dummy_ftex[1]={0};',
+    ]
+    for i, t in enumerate(ptexs):
+        c_lines.extend([f'static const uint8_t painting_pixels_{i}[]={{', array(t.pixels), '};'])
+    c_lines.append('static const sat_model_texture_asset_t painting_textures[]={')
+    for i, t in enumerate(ptexs):
+        c_lines.append(
+            f'{{.pixels=painting_pixels_{i},.width={t.width},.height={t.height},'
+            f'.palette_slot={t.lut_slot},.flags=SAT_MODEL_TEXTURE_LUT4,.pixel_count={t.width * t.height}}},'
+        )
+    c_lines += [
+        '};',
+        'static const uint16_t painting_luts[]={', hex_array(pluts), '};',
+        'const sat_model_asset_t castle_painting_model={.vertices=painting_dummy_verts,.vertex_count=4,'
+        '.indices=painting_dummy_faces,.face_count=1,.face_texture_indices=painting_dummy_ftex,'
+        f'.textures=painting_textures,.texture_count={len(ptexs)},.palettes_rgb555=0,.palette_count=0,'
+        f'.palette_base=0,.luts_rgb555=painting_luts,.lut_count={plut_cnt}}};',
+        'const sat_quad3_t castle_painting_quads[CASTLE_PAINTING_COUNT]={',
+    ]
+    for tl, tr, br, bl, _, _ in painting_quads:
+        c_lines.append(f'{{.v={{{vec(tl)},{vec(tr)},{vec(br)},{vec(bl)}}}}},')
+    c_lines += [
+        '};',
+        'const uint8_t castle_painting_tex_indices[CASTLE_PAINTING_COUNT]={',
+        array([q[4] for q in painting_quads]), '};',
+        'const uint8_t castle_painting_rooms[CASTLE_PAINTING_COUNT]={',
+        array([q[5] for q in painting_quads]), '};',
+        'static const sat_vec3_t door_vertices[]={',
+        ',\n'.join(vec(v) for v in dverts),
+        '};',
+        'static const uint16_t door_faces[]={',
+        array([i for f in dfaces for i in f]),
+        '};',
+    ]
+    for i, t in enumerate(dtexs):
+        c_lines.extend([f'static const uint8_t door_pixels_{i}[]={{', array(t.pixels), '};'])
+    c_lines.append('static const sat_model_texture_asset_t door_textures[]={')
+    for i, t in enumerate(dtexs):
+        c_lines.append(
+            f'{{.pixels=door_pixels_{i},.width={t.width},.height={t.height},'
+            f'.palette_slot={t.lut_slot},.flags=SAT_MODEL_TEXTURE_LUT4,.pixel_count={t.width * t.height}}},'
+        )
+    c_lines += [
+        '};',
+        'static const uint16_t door_luts[]={', hex_array(dluts), '};',
+        'static const uint16_t door_face_textures[]={', array(dftexs), '};',
+        f'const sat_model_asset_t castle_door_model={{.vertices=door_vertices,.vertex_count={len(dverts)},'
+        f'.indices=door_faces,.face_count={len(dfaces)},.face_texture_indices=door_face_textures,'
+        f'.textures=door_textures,.texture_count={len(dtexs)},.palettes_rgb555=0,.palette_count=0,'
+        f'.palette_base=0,.luts_rgb555=door_luts,.lut_count={dlut_cnt}}};',
+        'const sat_vec3_t castle_door_positions[CASTLE_DOOR_COUNT]={',
+        ',\n'.join(vec(d.position) for d in exit_doors),
+        '};',
+        'const int16_t castle_door_yaw_deg[CASTLE_DOOR_COUNT]={',
+        array([d.yaw_deg for d in exit_doors]), '};',
+        'const uint8_t castle_door_rooms[CASTLE_DOOR_COUNT]={',
+        array([d.in_area for d in exit_doors]), '};',
+        'static const sat_vec3_t toad_vertices[]={',
+        ',\n'.join(vec(v) for v in tverts),
+        '};',
+        'static const uint16_t toad_faces[]={',
+        array([i for f in tfaces for i in f]),
+        '};',
+    ]
+    for i, t in enumerate(ttexs):
+        c_lines.extend([f'static const uint8_t toad_pixels_{i}[]={{', array(t.pixels), '};'])
+    c_lines.append('static const sat_model_texture_asset_t toad_textures[]={')
+    for i, t in enumerate(ttexs):
+        c_lines.append(
+            f'{{.pixels=toad_pixels_{i},.width={t.width},.height={t.height},'
+            f'.palette_slot={t.lut_slot},.flags=SAT_MODEL_TEXTURE_LUT4,.pixel_count={t.width * t.height}}},'
+        )
+    c_lines += [
+        '};',
+        'static const uint16_t toad_luts[]={', hex_array(tluts), '};',
+        'static const uint16_t toad_face_textures[]={', array(tftexs), '};',
+        f'const sat_model_asset_t castle_toad_model={{.vertices=toad_vertices,.vertex_count={len(tverts)},'
+        f'.indices=toad_faces,.face_count={len(tfaces)},.face_texture_indices=toad_face_textures,'
+        f'.textures=toad_textures,.texture_count={len(ttexs)},.palettes_rgb555=0,.palette_count=0,'
+        f'.palette_base=0,.luts_rgb555=toad_luts,.lut_count={tlut_cnt}}};',
+        'const sat_vec3_t castle_toad_positions[CASTLE_TOAD_COUNT]={',
+        ',\n'.join(vec(t.position) for t in objs.toads),
+        '};',
+        'const int16_t castle_toad_yaw_deg[CASTLE_TOAD_COUNT]={',
+        array([t.yaw_deg for t in objs.toads]), '};',
+        'const uint8_t castle_toad_rooms[CASTLE_TOAD_COUNT]={',
+        array(objs.toad_rooms), '};',
+    ]
+    return h_lines, c_lines, objs, {
+        'castle_painting_count': len(painting_quads),
+        'castle_painting_texture_bytes': painting_bytes,
+        'castle_door_count': len(exit_doors),
+        'castle_door_texture_bytes': door_bytes,
+        'castle_toad_count': len(objs.toads),
+        'castle_toad_texture_bytes': toad_bytes,
+    }
+
+
 def _face_area(vertices, face):
     p0, p1, p2 = vertices[face[0]], vertices[face[1]], vertices[face[2]]
     def tri_area(a, b, c):
@@ -185,14 +393,134 @@ def _face_area(vertices, face):
     return area
 
 
+def _compact_rooms(vertices, faces, uvs, materials, origins, source_sets, face_rooms, colors, room_count):
+    """Order faces and vertices into contiguous per-room slices for fast O(1) room culling."""
+    order = sorted(range(len(faces)), key=lambda i: (face_rooms[i], i))
+    new_vertices = []
+    new_faces = []
+    new_uvs = []
+    new_materials = []
+    new_origins = []
+    new_source_sets = []
+    new_face_rooms = []
+    new_colors = [] if colors is not None else None
+    room_first = [0] * room_count
+    room_count_arr = [0] * room_count
+    room_vfirst = [0] * room_count
+    room_vcount = [0] * room_count
+    room_min = [(0.0, 0.0, 0.0)] * room_count
+    room_max = [(0.0, 0.0, 0.0)] * room_count
+
+    by_room = [[] for _ in range(room_count)]
+    for idx in order:
+        r = face_rooms[idx]
+        if not 0 <= r < room_count:
+            raise ValueError(f'room index {r} out of range 0..{room_count - 1}')
+        by_room[r].append(idx)
+
+    for r in range(room_count):
+        room_first[r] = len(new_faces)
+        room_vfirst[r] = len(new_vertices)
+        vmap = {}
+        r_pts = []
+        for idx in by_room[r]:
+            f = faces[idx]
+            remapped = []
+            for vi in f:
+                if vi not in vmap:
+                    vmap[vi] = len(new_vertices)
+                    pt = vertices[vi]
+                    new_vertices.append(pt)
+                    r_pts.append(pt)
+                remapped.append(vmap[vi])
+            new_faces.append(tuple(remapped))
+            new_uvs.append(uvs[idx])
+            new_materials.append(materials[idx])
+            new_origins.append(origins[idx])
+            new_source_sets.append(source_sets[idx])
+            new_face_rooms.append(r)
+            if new_colors is not None:
+                new_colors.append(colors[idx])
+        room_count_arr[r] = len(new_faces) - room_first[r]
+        room_vcount[r] = len(new_vertices) - room_vfirst[r]
+        if r_pts:
+            room_min[r] = tuple(min(p[k] for p in r_pts) for k in range(3))
+            room_max[r] = tuple(max(p[k] for p in r_pts) for k in range(3))
+
+    return (
+        new_vertices, new_faces, new_uvs, new_materials, new_origins, new_source_sets,
+        new_face_rooms, new_colors,
+        (room_first, room_count_arr, room_vfirst, room_vcount, room_min, room_max),
+    )
+
+
+def _compute_room_portals(vertices, faces, face_rooms, n_rooms, doors=()):
+    """Compute exact doorway portals (center_pos, room_a, room_b) from internal doors."""
+    room_pts = [set() for _ in range(n_rooms)]
+    for face, r in zip(faces, face_rooms):
+        for vi in face:
+            room_pts[r].add(vertices[vi])
+    portals = []
+    for d in doors:
+        if d.is_level_exit:
+            continue
+        p = d.position
+        dists = []
+        for r in range(n_rooms):
+            if not room_pts[r]:
+                continue
+            md = min(math.dist(p, q) for q in room_pts[r])
+            dists.append((md, r))
+        dists.sort()
+        if len(dists) >= 2:
+            ra, rb = dists[0][1], dists[1][1]
+            if ra > rb:
+                ra, rb = rb, ra
+            center = (p[0], p[1] + 8.0, p[2])
+            portals.append((center, ra, rb))
+    return portals
+
+
+def _compute_room_adjacency(room_min, room_max, doors=(), portals=()):
+    """Compute per-room adjacency bitmask from actual internal doorway portals."""
+    n = len(room_min)
+    adj = [1 << r for r in range(n)]
+    if portals:
+        for _, a, b in portals:
+            adj[a] |= 1 << b
+            adj[b] |= 1 << a
+        return adj
+    pad = 4.0
+    for d in doors:
+        if d.is_level_exit:
+            continue
+        linked = set()
+        if 0 <= d.in_area < n:
+            linked.add(d.in_area)
+        if 0 <= d.out_area < n:
+            linked.add(d.out_area)
+        for r in range(n):
+            if all(room_min[r][k] - pad <= d.position[k] <= room_max[r][k] + pad for k in range(3)):
+                linked.add(r)
+        for a in linked:
+            for b in linked:
+                adj[a] |= 1 << b
+    return adj
+
+
 def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             sdk_path=None, split_radius=96, adaptive_faces=0, texture_budget=96 * 1024,
             texture_samples=1, refine_faces=(), refine_grid=0, refine_manifest=None,
             adaptive_priorities=None, stitch_sources=(), stitch_cross_sources=(),
             pack_split_quads=False, vertex_colors=False, merge_quads=False, lut4=False,
-            max_edge=0.0, max_edge_radius=0.0, max_tile_size=48):
+            max_edge=0.0, max_edge_radius=0.0, max_tile_size=48, stage='main_castle'):
+    if stage not in ('main_castle', 'castle_1f'):
+        raise ValueError(f'unsupported stage: {stage}')
+    is_interior = (stage == 'castle_1f')
     fs = Filesystem.from_file(rom)
-    m = convert_bmd(fs.read('data/stage/main_castle/main_castle_all.bmd'))
+    bmd_path = f'data/stage/{stage}/{stage}_all.bmd'
+    kcl_path = f'data/stage/{stage}/{stage}.kcl'
+    m = convert_bmd(fs.read(bmd_path))
     refine_grids = {}
     refine_axes = {}
     if refine_manifest is not None:
@@ -217,9 +545,10 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
          'primitive': primitive, 'vertices': m.faces[i], 'uv': m.face_uvs[i]}
         for i, (group, display_list, material, primitive) in enumerate(m.face_provenance)
     ], indent=2) + '\n')
-    prisms = decode_kcl(fs.read('data/stage/main_castle/main_castle.kcl'))
+    prisms = decode_kcl(fs.read(kcl_path))
     vertices = [tuple(c * (1 << m.scale_shift) * 64 / 4096 for c in (v.x, v.y, v.z)) for v in m.vertices]
     faces, uvs, materials = m.faces, m.face_uvs, m.face_materials
+    face_rooms = list(m.face_rooms) if m.face_rooms else [0] * len(faces)
     colors = m.face_colors if vertex_colors and m.face_colors else None
     origins = list(range(len(faces)))
     source_sets = [(i,) for i in range(len(faces))]
@@ -234,9 +563,12 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     merged_quad_count = 0
     if merge_quads:
         pre_count = len(faces)
+        pre_rooms = face_rooms
         faces, uvs, materials, merged_cols, origins, source_sets = merge_coplanar_quads(
-            vertices, faces, uvs, materials, colors=colors, origins=origins
+            vertices, faces, uvs, materials, colors=colors, origins=origins,
+            rooms=pre_rooms if is_interior else None,
         )
+        face_rooms = [pre_rooms[o] for o in origins]
         if colors is not None:
             colors = merged_cols
         merged_quad_count = pre_count - len(faces)
@@ -263,15 +595,17 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             refine_grids = new_grids
             refine_axes = new_axes
 
+    split_center = (-64, 16) if is_interior else (0, 256)
     if sdk_split:
         if sdk_path is None:
             raise ValueError('SDK splitting requires --libsaturn-source')
         pre_origins = origins
         pre_source_sets = source_sets
+        pre_rooms = face_rooms
         if colors is not None:
             vertices, faces, uvs, materials, split_origins, colors = split_nearby(
                 vertices, faces, uvs, materials, sdk_path,
-                center=(0, 256), radius=split_radius, cell_size=sdk_split,
+                center=split_center, radius=split_radius, cell_size=sdk_split,
                 refine_faces=refine_faces, refine_cell_size=refine_grid,
                 refine_grids=refine_grids, refine_axes=refine_axes,
                 pack_quads=pack_split_quads, colors=colors,
@@ -280,7 +614,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         else:
             vertices, faces, uvs, materials, split_origins = split_nearby(
                 vertices, faces, uvs, materials, sdk_path,
-                center=(0, 256), radius=split_radius, cell_size=sdk_split,
+                center=split_center, radius=split_radius, cell_size=sdk_split,
                 refine_faces=refine_faces, refine_cell_size=refine_grid,
                 refine_grids=refine_grids, refine_axes=refine_axes,
                 pack_quads=pack_split_quads,
@@ -288,11 +622,41 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             )
         origins = [pre_origins[o] for o in split_origins]
         source_sets = [pre_source_sets[o] for o in split_origins]
+        face_rooms = [pre_rooms[o] for o in split_origins]
         (out / 'castle_split_origins.json').write_text(json.dumps(origins) + '\n')
     elif split_edge:
+        pre_rooms = face_rooms
         vertices, faces, uvs, materials, origins = split_large_faces(vertices, faces, uvs, materials, split_edge)
         source_sets = [(o,) for o in origins]
+        face_rooms = [pre_rooms[o] for o in origins]
         (out / 'castle_split_origins.json').write_text(json.dumps(origins) + '\n')
+    elif max_edge > 0:
+        pre_origins = origins
+        pre_source_sets = source_sets
+        pre_rooms = face_rooms
+        high_y = 60.0 if is_interior else None
+        high_me = max_edge * 2.0 if is_interior else None
+        if colors is not None:
+            vertices, faces, uvs, materials, split_origins, colors = split_long_edges(
+                vertices, faces, uvs, materials, max_edge,
+                colors=colors, high_y=high_y, high_max_edge=high_me,
+            )
+        else:
+            vertices, faces, uvs, materials, split_origins = split_long_edges(
+                vertices, faces, uvs, materials, max_edge,
+                high_y=high_y, high_max_edge=high_me,
+            )
+        origins = [pre_origins[o] for o in split_origins]
+        source_sets = [pre_source_sets[o] for o in split_origins]
+        face_rooms = [pre_rooms[o] for o in split_origins]
+        (out / 'castle_split_origins.json').write_text(json.dumps(origins) + '\n')
+
+    room_meta = None
+    if is_interior and len(m.bones) > 1:
+        (vertices, faces, uvs, materials, origins, source_sets,
+         face_rooms, colors, room_meta) = _compact_rooms(
+            vertices, faces, uvs, materials, origins, source_sets, face_rooms, colors, len(m.bones)
+        )
 
     def bake_castle(size):
         bakes = []
@@ -374,21 +738,83 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     flat_faces = [i for i, face in enumerate(faces)
                   if len({fx(vertices[index][1]) for index in face}) == 1]
     planes = support_planes(vertices, faces)
-    header = ['#pragma once', '#include <saturn/model3d.h>', '#include "sm64ds_play.h"',
-              f'#define CASTLE_VERTEX_COUNT {len(vertices)}u', f'#define CASTLE_FACE_COUNT {len(faces)}u',
-              '#define CASTLE_FACE_SOURCE_AVAILABLE 1',
-              '#define CASTLE_FLAT_FACE_LIST_AVAILABLE 1',
-              f'#define CASTLE_FLAT_FACE_COUNT {len(flat_faces)}u',
-              '#define CASTLE_SUPPORT_PLANE_LIST_AVAILABLE 1',
-              f'#define CASTLE_SUPPORT_PLANE_COUNT {len(planes)}u',
-              f'#define CASTLE_TEXTURE_COUNT {len(textures)}u', 'extern const sat_model_asset_t castle_model;',
-              'extern const sm64ds_collision_t castle_collision;',
-              'extern const uint16_t castle_face_source[CASTLE_FACE_COUNT];',
-              'extern const uint16_t castle_flat_faces[];',
-              'extern const uint16_t castle_support_faces[];',
-              'extern const sat_vec3_t castle_support_normals[];',
-              'extern const uint8_t castle_double_sided[CASTLE_FACE_COUNT];',
-              'extern const uint8_t castle_polygon_alpha[CASTLE_FACE_COUNT];']
+    header = ['#pragma once', '#include <saturn/model3d.h>', '#include "sm64ds_play.h"']
+    if is_interior:
+        header += [
+            '#define CASTLE_STAGE_ID 1u',
+            '#define CASTLE_STAGE_NAME "C1F"',
+            '#define CASTLE_HAS_SKYBOX 0',
+            f'#define CASTLE_SPAWN_X {fx(-64.0)}',
+            f'#define CASTLE_SPAWN_Y {fx(0.0)}',
+            f'#define CASTLE_SPAWN_Z {fx(64.0)}',
+            f'#define CASTLE_SPAWN_FLOOR_CEILING {fx(24.0)}',
+            '#define CASTLE_SPAWN_YAW 0',
+            '#define CASTLE_SPAWN_FACING 180',
+            f'#define CASTLE_RETURN_SPAWN_X {fx(-64.0)}',
+            f'#define CASTLE_RETURN_SPAWN_Z {fx(64.0)}',
+            f'#define CASTLE_RETURN_FLOOR_CEILING {fx(24.0)}',
+            '#define CASTLE_RETURN_YAW 0',
+            '#define CASTLE_RETURN_FACING 180',
+            '#define CASTLE_DEFAULT_CAM_DIST 52',
+            '#define CASTLE_CLOSE_CAM_DIST 32',
+            '#define CASTLE_BG_R 3',
+            '#define CASTLE_BG_G 4',
+            '#define CASTLE_BG_B 7',
+            '#define CASTLE_WARP_AVAILABLE 1',
+            '#define CASTLE_WARP_TARGET_BIN "0.BIN"',
+            '#define CASTLE_WARP_TARGET_ENTRANCE 1u',
+            f'#define CASTLE_WARP_MIN_X {fx(-78.0)}',
+            f'#define CASTLE_WARP_MAX_X {fx(-50.0)}',
+            f'#define CASTLE_WARP_MIN_Y {fx(-4.0)}',
+            f'#define CASTLE_WARP_MAX_Y {fx(18.0)}',
+            f'#define CASTLE_WARP_MIN_Z {fx(124.0)}',
+            f'#define CASTLE_WARP_MAX_Z {fx(144.0)}',
+        ]
+    else:
+        header += [
+            '#define CASTLE_STAGE_ID 0u',
+            '#define CASTLE_STAGE_NAME "EXT"',
+            '#define CASTLE_HAS_SKYBOX 1',
+            f'#define CASTLE_SPAWN_X {fx(0.0)}',
+            f'#define CASTLE_SPAWN_Y {fx(100.0)}',
+            f'#define CASTLE_SPAWN_Z {fx(256.0)}',
+            f'#define CASTLE_SPAWN_FLOOR_CEILING {fx(512.0)}',
+            '#define CASTLE_SPAWN_YAW 0',
+            '#define CASTLE_SPAWN_FACING 180',
+            f'#define CASTLE_RETURN_SPAWN_X {fx(0.0)}',
+            f'#define CASTLE_RETURN_SPAWN_Z {fx(-18.0)}',
+            f'#define CASTLE_RETURN_FLOOR_CEILING {fx(80.0)}',
+            '#define CASTLE_RETURN_YAW 180',
+            '#define CASTLE_RETURN_FACING 0',
+            '#define CASTLE_DEFAULT_CAM_DIST 65',
+            '#define CASTLE_CLOSE_CAM_DIST 35',
+            '#define CASTLE_BG_R 12',
+            '#define CASTLE_BG_G 20',
+            '#define CASTLE_BG_B 30',
+            '#define CASTLE_WARP_AVAILABLE 1',
+            '#define CASTLE_WARP_TARGET_BIN "C1F.BIN"',
+            '#define CASTLE_WARP_TARGET_ENTRANCE 0u',
+            f'#define CASTLE_WARP_MIN_X {fx(-16.0)}',
+            f'#define CASTLE_WARP_MAX_X {fx(16.0)}',
+            f'#define CASTLE_WARP_MIN_Y {fx(44.0)}',
+            f'#define CASTLE_WARP_MAX_Y {fx(66.0)}',
+            f'#define CASTLE_WARP_MIN_Z {fx(-74.0)}',
+            f'#define CASTLE_WARP_MAX_Z {fx(-58.0)}',
+        ]
+    header += [f'#define CASTLE_VERTEX_COUNT {len(vertices)}u', f'#define CASTLE_FACE_COUNT {len(faces)}u',
+               '#define CASTLE_FACE_SOURCE_AVAILABLE 1',
+               '#define CASTLE_FLAT_FACE_LIST_AVAILABLE 1',
+               f'#define CASTLE_FLAT_FACE_COUNT {len(flat_faces)}u',
+               '#define CASTLE_SUPPORT_PLANE_LIST_AVAILABLE 1',
+               f'#define CASTLE_SUPPORT_PLANE_COUNT {len(planes)}u',
+               f'#define CASTLE_TEXTURE_COUNT {len(textures)}u', 'extern const sat_model_asset_t castle_model;',
+               'extern const sm64ds_collision_t castle_collision;',
+               'extern const uint16_t castle_face_source[CASTLE_FACE_COUNT];',
+               'extern const uint16_t castle_flat_faces[];',
+               'extern const uint16_t castle_support_faces[];',
+               'extern const sat_vec3_t castle_support_normals[];',
+               'extern const uint8_t castle_double_sided[CASTLE_FACE_COUNT];',
+               'extern const uint8_t castle_polygon_alpha[CASTLE_FACE_COUNT];']
     code = ['#include "castle_scene.h"', '/* Private ROM-derived data. Never commit. */',
             'static const sat_vec3_t vertices[]={', ',\n'.join(vec(v) for v in vertices), '};',
             'static const uint16_t faces[]={', array([i for face in faces for i in face]), '};',
@@ -452,22 +878,92 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
              'const sm64ds_collision_t castle_collision={.prisms=prisms,.offsets=offsets,.indices=collision_indices,',
              f'.count={len(prisms)},.nx={nx},.nz={nz},.origin_x={fx(ox)},.origin_z={fx(oz)}' + '};', '']
     props_report = {}
+    c1f_objs = None
     if lut4:
-        prop_h, prop_c, props_report = _build_castle_props(fs)
+        if is_interior:
+            prop_h, prop_c, c1f_objs, props_report = _build_castle_1f_props(fs)
+        else:
+            prop_h, prop_c, props_report = _build_castle_props(fs)
         header.extend(prop_h)
         code.extend(prop_c)
         code.append('')
+    if room_meta is not None:
+        room_first, room_count_arr, room_vfirst, room_vcount, room_min, room_max = room_meta
+        room_portals = _compute_room_portals(
+            vertices, faces, face_rooms, len(room_first), c1f_objs.doors if c1f_objs else ()
+        )
+        room_adj = _compute_room_adjacency(
+            room_min, room_max, c1f_objs.doors if c1f_objs else (), portals=room_portals
+        )
+        support_rooms = [face_rooms[f] for f, _ in planes] or [0]
+        # Floor decal faces in room 0 (e.g. the iconic Sun Carpet floating 1 unit
+        # above the sunken checkered pit floor) need a slight painter-depth bias so
+        # underlying larger floor strips never sort over them.
+        floor_decals = []
+        for fi, (face, mat) in enumerate(zip(faces, materials)):
+            if face_rooms[fi] != 0:
+                continue
+            tex = m.material_textures[mat]
+            if tex is None or not any(px[3] == 0 for px in tex.pixels):
+                continue
+            ys = [vertices[vi][1] for vi in face]
+            if max(ys) - min(ys) <= 0.05 and max(ys) < -0.5:
+                floor_decals.append(fi)
+        header += [
+            '#define CASTLE_ROOM_CULLING 1',
+            f'#define CASTLE_ROOM_COUNT {len(room_first)}u',
+            f'#define CASTLE_FLOOR_DECAL_COUNT {len(floor_decals)}u',
+            f'#define CASTLE_PORTAL_COUNT {len(room_portals)}u',
+            'extern const uint16_t castle_room_first[CASTLE_ROOM_COUNT];',
+            'extern const uint16_t castle_room_count[CASTLE_ROOM_COUNT];',
+            'extern const uint16_t castle_room_vfirst[CASTLE_ROOM_COUNT];',
+            'extern const uint16_t castle_room_vcount[CASTLE_ROOM_COUNT];',
+            'extern const sat_vec3_t castle_room_min[CASTLE_ROOM_COUNT];',
+            'extern const sat_vec3_t castle_room_max[CASTLE_ROOM_COUNT];',
+            'extern const uint8_t castle_room_adj[CASTLE_ROOM_COUNT];',
+            'extern const uint8_t castle_support_rooms[];',
+            'extern const uint16_t castle_floor_decals[];',
+            'extern const sat_vec3_t castle_portal_pos[];',
+            'extern const uint8_t castle_portal_room_a[];',
+            'extern const uint8_t castle_portal_room_b[];',
+        ]
+        code += [
+            'const uint16_t castle_room_first[CASTLE_ROOM_COUNT]={', array(room_first), '};',
+            'const uint16_t castle_room_count[CASTLE_ROOM_COUNT]={', array(room_count_arr), '};',
+            'const uint16_t castle_room_vfirst[CASTLE_ROOM_COUNT]={', array(room_vfirst), '};',
+            'const uint16_t castle_room_vcount[CASTLE_ROOM_COUNT]={', array(room_vcount), '};',
+            'const sat_vec3_t castle_room_min[CASTLE_ROOM_COUNT]={',
+            ',\n'.join(vec(v) for v in room_min), '};',
+            'const sat_vec3_t castle_room_max[CASTLE_ROOM_COUNT]={',
+            ',\n'.join(vec(v) for v in room_max), '};',
+            'const uint8_t castle_room_adj[CASTLE_ROOM_COUNT]={', array(room_adj), '};',
+            'const uint8_t castle_support_rooms[]={', array(support_rooms), '};',
+            'const uint16_t castle_floor_decals[]={', array(floor_decals or [0]), '};',
+            'const sat_vec3_t castle_portal_pos[]={',
+            ',\n'.join(vec(pos) for pos, _, _ in room_portals) if room_portals else '{0,0,0}', '};',
+            'const uint8_t castle_portal_room_a[]={',
+            array([ra for _, ra, _ in room_portals] or [0]), '};',
+            'const uint8_t castle_portal_room_b[]={',
+            array([rb for _, _, rb in room_portals] or [0]), '};',
+            '',
+        ]
+        props_report['castle_room_counts'] = room_count_arr
+        props_report['castle_room_vcounts'] = room_vcount
+        props_report['castle_room_adj'] = room_adj
+        props_report['castle_portal_count'] = len(room_portals)
     (out / 'castle_scene.h').write_text('\n'.join(header) + '\n')
     (out / 'castle_scene.c').write_text('\n'.join(code))
 
     if lut4:
         convert(['--rom', str(rom), '--out', str(out), '--tile-size', '24', '--lut4', '--adaptive-size'])
-        convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', 'data/vrbox/vr02.bmd',
-                 '--name', 'skybox_preview', '--tile-size', '16', '--lut4', '--subdivide-sky'])
+        if not is_interior:
+            convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', 'data/vrbox/vr02.bmd',
+                     '--name', 'skybox_preview', '--tile-size', '16', '--lut4', '--subdivide-sky'])
     else:
         convert(['--rom', str(rom), '--out', str(out), '--tile-size', '24'])
-        convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', 'data/vrbox/vr02.bmd',
-                 '--name', 'skybox_preview'])
+        if not is_interior:
+            convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', 'data/vrbox/vr02.bmd',
+                     '--name', 'skybox_preview'])
 
     # The gameplay head shares the body's bone-local convention. The
     # top-level b_mario_head_cap is a different, larger model/orientation.
@@ -480,7 +976,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         raise ValueError('head attachment requires its original model scale')
     (out / 'mario_head.h').write_text(h)
     (out / 'mario_head.c').write_text(c)
-    report = {'rom_sha256': fs.sha256, 'render_vertices': len(vertices), 'render_faces': len(faces),
+    report = {'rom_sha256': fs.sha256, 'stage': stage, 'render_vertices': len(vertices), 'render_faces': len(faces),
               'render_quads': sum(1 for f in faces if f[2] != f[3]),
               'render_triangles': sum(1 for f in faces if f[2] == f[3]),
               'merged_quad_pairs': merged_quad_count,
@@ -540,8 +1036,10 @@ if __name__ == '__main__':
     p.add_argument('--stitch-cross-source', type=int, nargs=2, action='append', default=[], metavar=('FACE_A', 'FACE_B'), help='Experimentally stitch shared edges between two source faces')
     p.add_argument('--texture-budget', type=int, default=96 * 1024, help='Adaptive castle pixel budget in bytes')
     p.add_argument('--texture-samples', type=int, choices=(1, 2, 4), default=1, help='Samples per axis for filtered castle bakes')
+    p.add_argument('--stage', choices=('main_castle', 'castle_1f'), default='main_castle', help='Castle stage to export')
     a = p.parse_args()
     prepare(a.rom, a.out, a.tile_size, a.split_edge, a.sdk_split_grid,
             a.libsaturn_source, a.split_radius, a.adaptive_faces, a.texture_budget, a.texture_samples,
             a.refine_face, a.refine_grid, a.refine_manifest, a.adaptive_priorities, a.stitch_source, a.stitch_cross_source,
-            a.pack_split_quads, a.vertex_colors, a.merge_quads, a.lut4, a.max_edge, a.max_edge_radius, a.max_tile_size)
+            a.pack_split_quads, a.vertex_colors, a.merge_quads, a.lut4, a.max_edge, a.max_edge_radius, a.max_tile_size,
+            a.stage)

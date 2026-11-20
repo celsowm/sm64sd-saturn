@@ -41,7 +41,7 @@ def _is_uv_quad_clean(uv0, uv1, uv2, uv3):
 
 
 def merge_coplanar_quads(vertices, faces, uvs, materials, *, colors=None,
-                         origins=None, min_dot=0.998, max_plane_dist=0.25,
+                         origins=None, rooms=None, min_dot=0.998, max_plane_dist=0.25,
                          rel_plane_dist=0.005):
     """Pair coplanar triangles with consistent UVs and colors into native quads.
 
@@ -72,6 +72,8 @@ def merge_coplanar_quads(vertices, faces, uvs, materials, *, colors=None,
             continue
         (f1, e1, a1), (f2, e2, a2) = entries
         if materials[f1] != materials[f2]:
+            continue
+        if rooms is not None and rooms[f1] != rooms[f2]:
             continue
         if e1[0] != e2[1] or e1[1] != e2[0] or a1 == a2:
             continue

@@ -7,8 +7,12 @@ from .filesystem import Filesystem
 
 DS_TO_SATURN_SCALE = 0.064
 OBJ_ID_BOMB_TREE = 41
+OBJ_ID_PAINTING = 42
 OBJ_ID_TATEFUDA = 76
+OBJ_ID_KINOPIO = 80
+OBJ_ID_BOWSER_PAINTING = 275
 CASTLE_GROUNDS_OVERLAY_ID = 9
+CASTLE_1F_OVERLAY_ID = 10
 
 
 @dataclass(frozen=True)
@@ -17,6 +21,35 @@ class LevelProp:
     position: tuple[float, float, float]
     yaw_deg: int = 0
     param: int = 0
+
+
+@dataclass(frozen=True)
+class DoorPlacement:
+    position: tuple[float, float, float]
+    yaw_deg: int
+    in_area: int
+    out_area: int
+    door_type: int
+    is_level_exit: bool
+
+
+@dataclass(frozen=True)
+class PaintingPlacement:
+    model_path: str
+    position: tuple[float, float, float]
+    yaw_deg: int
+    width: float
+    height: float
+    room: int
+    centered_y: bool = False
+
+
+@dataclass(frozen=True)
+class Castle1fObjects:
+    doors: list[DoorPlacement]
+    paintings: list[PaintingPlacement]
+    toads: list[LevelProp]
+    toad_rooms: list[int]
 
 
 def blz_decompress(data: bytes) -> bytes:
@@ -140,3 +173,116 @@ def extract_castle_props(fs: Filesystem) -> tuple[list[LevelProp], list[LevelPro
                         param=param,
                     ))
     return trees, signs
+
+
+# Painting param high-byte -> NitroFS model path for Castle 1F course paintings.
+CASTLE_1F_PAINTING_MODELS = {
+    0: "data/picture/for_bh.bmd",  # Bob-omb Battlefield (r1)
+    1: "data/picture/for_bk.bmd",  # Whomp's Fortress (r5)
+    2: "data/picture/for_ki.bmd",  # Jolly Roger Bay (r7)
+    3: "data/picture/for_sm.bmd",  # Cool, Cool Mountain (r3)
+}
+
+
+def extract_castle_1f_objects(fs: Filesystem) -> Castle1fObjects:
+    """Extract Peach's Castle 1F doors, course paintings, and Toads from overlay 10."""
+    ram_addr, data = read_arm9_overlay(fs, CASTLE_1F_OVERLAY_ID)
+    # Locate the LevelOverlay header via castle_1f BMD/KCL ov0 file IDs (0x0608, 0x0600).
+    marker = struct.pack("<HH", 0x0608, 0x0600)
+    hdr_off = data.find(marker)
+    if hdr_off < 0x10:
+        raise FormatError("castle_1f LevelOverlay header not found in overlay 10")
+    base = hdr_off - 0x10
+    global_bank_ptr = struct.unpack_from("<I", data, base + 0x0C)[0]
+    area_ptr = struct.unpack_from("<I", data, base + 0x18)[0]
+    area_cnt = data[base + 0x1C]
+    if area_cnt != 8:
+        raise FormatError(f"unexpected castle_1f area count: {area_cnt}")
+
+    doors: list[DoorPlacement] = []
+    gb_off = _ptr_to_off(global_bank_ptr, ram_addr, len(data))
+    gb_count, gb_list_ptr = struct.unpack_from("<II", data, gb_off)
+    gb_list_off = _ptr_to_off(gb_list_ptr, ram_addr, len(data))
+    for i in range(gb_count):
+        tag_type, obj_count, _pad, arr_ptr = struct.unpack_from("<BBHI", data, gb_list_off + i * 8)
+        if (tag_type & 0x1F) != 9:  # Door/portal list (12 bytes each)
+            continue
+        arr_off = _ptr_to_off(arr_ptr, ram_addr, len(data))
+        if arr_off + obj_count * 12 > len(data):
+            raise FormatError("castle_1f door array exceeds overlay bounds")
+        for j in range(obj_count):
+            x, y, z, ry, p1, p2 = struct.unpack_from("<hhhhHH", data, arr_off + j * 12)
+            in_area = (p1 >> 12) & 0xF
+            out_area = (p1 >> 8) & 0xF
+            yaw = round(ry * 360.0 / 65536.0) % 360
+            pos = (x * DS_TO_SATURN_SCALE, y * DS_TO_SATURN_SCALE, z * DS_TO_SATURN_SCALE)
+            # Door types 1 (front), 6 (basement), 7 (upstairs 2F), and courtyard exit (z < -300)
+            # are level-boundary exits rather than open internal room archways.
+            is_exit = (p2 in (1, 6, 7)) or (pos[2] < -300.0)
+            doors.append(DoorPlacement(
+                position=pos,
+                yaw_deg=yaw,
+                in_area=in_area,
+                out_area=out_area,
+                door_type=p2,
+                is_level_exit=is_exit,
+            ))
+
+    paintings: list[PaintingPlacement] = []
+    toads: list[LevelProp] = []
+    toad_rooms: list[int] = []
+    area_off = _ptr_to_off(area_ptr, ram_addr, len(data))
+    for room in range(area_cnt):
+        bank_ptr = struct.unpack_from("<I", data, area_off + room * 12)[0]
+        if not (ram_addr <= bank_ptr < ram_addr + len(data)):
+            continue
+        bank_off = bank_ptr - ram_addr
+        list_count, list_ptr = struct.unpack_from("<II", data, bank_off)
+        if not 1 <= list_count <= 32:
+            continue
+        list_off = _ptr_to_off(list_ptr, ram_addr, len(data))
+        for i in range(list_count):
+            tag_type, obj_count, _pad, arr_ptr = struct.unpack_from("<BBHI", data, list_off + i * 8)
+            if (tag_type & 0x1F) != 0:  # Standard objects (16 bytes each)
+                continue
+            arr_off = _ptr_to_off(arr_ptr, ram_addr, len(data))
+            if arr_off + obj_count * 16 > len(data):
+                raise FormatError("castle_1f standard object array exceeds overlay bounds")
+            for j in range(obj_count):
+                oid, x, y, z, _rx, ry, _rz, param = struct.unpack_from("<HhhhhhhH", data, arr_off + j * 16)
+                pos = (x * DS_TO_SATURN_SCALE, y * DS_TO_SATURN_SCALE, z * DS_TO_SATURN_SCALE)
+                yaw = round(ry * 360.0 / 65536.0) % 360
+                if oid == OBJ_ID_PAINTING:
+                    course_idx = (param >> 8) & 0xF
+                    model_path = CASTLE_1F_PAINTING_MODELS.get(course_idx)
+                    if model_path is not None:
+                        w_units = (((param >> 4) & 0xF) + 1) * 100.0 * DS_TO_SATURN_SCALE
+                        h_units = ((param & 0xF) + 1) * 100.0 * DS_TO_SATURN_SCALE
+                        paintings.append(PaintingPlacement(
+                            model_path=model_path,
+                            position=pos,
+                            yaw_deg=yaw,
+                            width=w_units,
+                            height=h_units,
+                            room=room,
+                        ))
+                elif oid == OBJ_ID_BOWSER_PAINTING:
+                    paintings.append(PaintingPlacement(
+                        model_path="data/special_obj/c1_peach/c1_peach.bmd",
+                        position=pos,
+                        yaw_deg=yaw,
+                        width=37.5,
+                        height=37.5,
+                        room=room,
+                        centered_y=True,
+                    ))
+                elif oid == OBJ_ID_KINOPIO:
+                    toads.append(LevelProp(
+                        object_id=oid,
+                        position=pos,
+                        yaw_deg=yaw,
+                        param=param,
+                    ))
+                    toad_rooms.append(room)
+
+    return Castle1fObjects(doors=doors, paintings=paintings, toads=toads, toad_rooms=toad_rooms)
