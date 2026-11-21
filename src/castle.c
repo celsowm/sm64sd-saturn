@@ -470,11 +470,14 @@ static void update_camera_alive(void) {
 #else
     int32_t distance=(close_camera?castle_stage.close_cam_dist:castle_stage.default_cam_dist)*ONE;
 #endif
+    /* A swimmer sees the water volume from a wider berth: a wall a few units
+     * behind the camera would fill the view, so ask for more room first. */
+    const int32_t keep=player.swimming?40*ONE:20*ONE,restore=player.swimming?50*ONE:25*ONE;
     sat_vec3_t candidates[8];int32_t fractions[8]={0},clearance[8]={0};
     candidates[0]=camera_candidate(yaw,distance);
     fractions[0]=sm64ds_camera_fraction(&castle_collision,&camera.target,&candidates[0]);
     clearance[0]=sat_fx16_mul(distance,fractions[0]);
-    if (clearance[0]>=25*ONE) camera_choice=0;
+    if (clearance[0]>=restore) camera_choice=0;
     else {
         if (camera_choice>0 && camera_choice<8) {
             int angle=(yaw+camera_offsets[camera_choice]+360)%360;
@@ -482,7 +485,7 @@ static void update_camera_alive(void) {
             fractions[camera_choice]=sm64ds_camera_fraction(&castle_collision,&camera.target,&candidates[camera_choice]);
             clearance[camera_choice]=sat_fx16_mul(distance,fractions[camera_choice]);
         }
-        if (!camera_choice || clearance[camera_choice]<20*ONE) {
+        if (!camera_choice || clearance[camera_choice]<keep) {
             for (uint8_t i=1;i<8;++i) {
                 if (i==camera_choice) continue;
                 int angle=(yaw+camera_offsets[i]+360)%360;
@@ -490,7 +493,7 @@ static void update_camera_alive(void) {
                 fractions[i]=sm64ds_camera_fraction(&castle_collision,&camera.target,&candidates[i]);
                 clearance[i]=sat_fx16_mul(distance,fractions[i]);
             }
-            camera_choice=sm64ds_camera_select(clearance,8,camera_choice,20*ONE,25*ONE);
+            camera_choice=sm64ds_camera_select(clearance,8,camera_choice,keep,restore);
         }
     }
     camera_yaw=(yaw+camera_offsets[camera_choice]+360)%360;
