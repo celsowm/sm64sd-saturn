@@ -538,11 +538,26 @@ static void simulation(const sat_pad_state_t *pad,uint8_t jump) {
     if(x&&z)speed=sat_fx16_mul(speed,46341);
     int32_t s=sat_sin_deg(camera_yaw*ONE),c=sat_cos_deg(camera_yaw*ONE);
     int32_t dx=sat_fx16_mul(x*c+z*s,speed),dz=sat_fx16_mul(z*c-x*s,speed);
-    if(x||z) {
+    if(player.swimming) {
+        /* St_Swim: the d-pad turns and pitches (back rises), A strokes. */
+        player.swim_turn=(int8_t)x;player.swim_pitch=(int8_t)z;
+        player.swim_stroke_held=(pad->held&SAT_PAD_A)!=0;
+        dx=dz=0;
+    } else if(x||z) {
         int heading=z<0?(x<0?225:x>0?135:180):z>0?(x<0?315:x>0?45:0):(x<0?270:90);
         facing=(heading+camera_yaw)%360;
     }
+    if(!player.swimming) player.yaw=(uint16_t)((uint32_t)facing*65536u/360u);
     sm64ds_player_step(&player,&castle_collision,dx,dz,jump,(pad->held&SAT_PAD_B)!=0);
+    if(player.swimming) {
+        facing=(int)((((uint32_t)player.yaw*360u)+32768u)>>16)%360;
+        /* The camera eases round behind the swimmer unless L/R steer it. */
+        if(!(pad->held&(SAT_PAD_L|SAT_PAD_R))) {
+            int behind=(facing+180-camera_offsets[camera_choice]+720)%360;
+            int turn=(behind-yaw+540)%360-180;
+            yaw=(yaw+(turn>2?2:turn<-2?-2:turn)+360)%360;
+        }
+    }
     player.held_yaw=(uint8_t)((facing+camera_yaw)%360);
 #ifdef CASTLE_ACTOR_KINDS_AVAILABLE
     sm64ds_actor_hit_t hit={0,0,0,0,0,0,0,0,0};
@@ -564,6 +579,9 @@ static void simulation(const sat_pad_state_t *pad,uint8_t jump) {
     }
 #endif
     uint16_t next=!player.grounded?3:player.moving?(player.running?2:1):0;
+#if MARIO_PREVIEW_CLIP_COUNT >= 6
+    if(player.swimming) next=(player.swim_phase==2||player.swim_phase==3)?4:5;
+#endif
     if(next!=clip) {clip=next;anim_time=0;}
     anim_time+=ONE/60;
 }
@@ -1230,6 +1248,11 @@ int main(void) {
             transform.position.y+=sat_fx16_mul(idle_ground_y-pose_low,transform.scale.y)+ONE/256;
 #endif
         transform.rotation_deg.y=facing*ONE;
+        if(player.swimming) {
+            /* St_Swim's body pitch: 6/10 of the nose-up angle, 10/8 nose down. */
+            int32_t pitch=player.pitch<0?player.pitch*6/10:player.pitch*10/8;
+            transform.rotation_deg.x=pitch*360;
+        }
         SAT_PANIC_IF_ERROR(sat_model_transform3d_matrix(&transform,&actor_world));
 #if SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_GROUND_POSE
         if(player.grounded) {

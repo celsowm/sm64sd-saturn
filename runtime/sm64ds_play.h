@@ -28,7 +28,7 @@ typedef struct {
     int32_t velocity_y;
     uint32_t ticks, jumps, landings, wall_hits, resets;
     uint8_t grounded, moving, running;
-    uint8_t swimming;         /* 1 while the feet rest on a water surface */
+    uint8_t swimming;         /* 1 while in the swim state (St_Swim) */
     int32_t knock_x, knock_z; /* per-step push from hits; decays */
     uint8_t health, max_health;
     uint8_t invuln;           /* hurt i-frames left, in 60 Hz steps */
@@ -36,6 +36,18 @@ typedef struct {
     uint16_t death_timer;     /* steps until respawn at `spawn` */
     uint16_t coins;           /* collected this life; every 50 heals 1 */
     uint8_t held_yaw;         /* boss: facing to throw along while carrying */
+    /* Swimming, after the DS St_Swim_Main. The caller sets the inputs before
+     * each step. Angles use the DS 0x10000-per-turn units. While swimming the
+     * step turns `yaw` itself; otherwise the caller keeps it at the facing. */
+    int8_t swim_turn, swim_pitch; /* d-pad: 1 = right; 1 = back (rise) */
+    uint8_t swim_stroke_held;     /* stroke button held */
+    uint8_t swim_phase, swim_timer, swim_released, swim_wall;
+    uint16_t yaw;
+    int16_t pitch, yaw_speed;     /* pitch: nose down is positive */
+    int32_t swim_speed;           /* along the pitch, 16.16 per step */
+    int32_t water_y;              /* surface of the water being swum */
+    uint16_t air_ticks;           /* steps spent deep, toward a lost health point */
+    uint16_t heal_ticks;          /* steps at the surface, toward a healed one */
 } sm64ds_player_t;
 
 /* Fixed 60 Hz prototype locomotion. Distances are in the exported world.
@@ -45,6 +57,9 @@ int sm64ds_floor(const sm64ds_collision_t *, int32_t x, int32_t z,
 /* As above, also returns the normal of the selected highest floor. */
 int sm64ds_floor_normal(const sm64ds_collision_t *, int32_t x, int32_t z,
                         int32_t ceiling, int32_t *height, sat_vec3_t *normal);
+/* The lowest water surface at or above `from` at x/z (CLPS water bit). */
+int sm64ds_water_surface(const sm64ds_collision_t *, int32_t x, int32_t z,
+                         int32_t from, int32_t *height);
 /* Upward translation needed to keep transformed body vertices above a floor
  * plane. The caller decides whether that plane is appropriate for the pose. */
 int32_t sm64ds_ground_pose_lift(const sat_vec3_t *vertices,uint16_t count,

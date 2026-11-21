@@ -119,43 +119,70 @@ int main(void) {
     x_before=sp.feet.x;
     for(int i=0;i<15;++i)sm64ds_player_step(&sp,&sw,O,0,0,1);
     assert(sp.feet.x>x_before+5*O);
-    /* Water: a beach at y=2, a bay surface at y=0 whose CLPS index carries the
-     * water bit, and a far shore at y=2. Walking off the beach floats at the
-     * surface (swimming), swims slower, and climbs back out onto the shore. */
+    /* Water: a bay surface at y=0 whose CLPS index carries the water bit, over
+     * a beach at y=2, a seabed at y=-20 and a shallow shelf at y=-4 out to x=90. Walking
+     * off the beach dives in, strokes swim along the facing, the swimmer rises
+     * to float with the feet 80 DS units (5.12) under the surface, and the
+     * shelf is shallow enough to wade out onto. */
     {
         const sm64ds_prism_t water_prisms[]={
             {.origin={0,0,0},.normal={0,O,0},.edges={{-O,0,0},{0,0,-O},{O,0,O}},
-             .min={0,0,0},.max={40*O,0,40*O},.extent=40*O,.attribute=2},
+             .min={0,0,0},.max={90*O,0,40*O},.extent=200*O,.attribute=2},
             {.origin={0,2*O,0},.normal={0,O,0},.edges={{-O,0,0},{0,0,-O},{O,0,O}},
              .min={0,2*O,0},.max={20*O,2*O,40*O},.extent=40*O,.attribute=1},
-            {.origin={40*O,2*O,0},.normal={0,O,0},.edges={{-O,0,0},{0,0,-O},{O,0,O}},
-             .min={40*O,2*O,0},.max={80*O,2*O,40*O},.extent=40*O,.attribute=3}
+            {.origin={20*O,-20*O,0},.normal={0,O,0},.edges={{-O,0,0},{0,0,-O},{O,0,O}},
+             .min={20*O,-20*O,0},.max={40*O,-20*O,40*O},.extent=100*O,.attribute=4},
+            {.origin={40*O,-4*O,0},.normal={0,O,0},.edges={{-O,0,0},{0,0,-O},{O,0,O}},
+             .min={40*O,-4*O,0},.max={90*O,-4*O,40*O},.extent=200*O,.attribute=3}
         };
-        uint32_t woff[2]={0,3};uint16_t windex[3]={0,1,2};
-        sm64ds_collision_t ww={water_prisms,woff,windex,3,1,1,0,0,0u,(1u<<2)};
+        const int32_t float_y=-(O*512/100);
+        /* Three 32-unit cells along x, each listing every prism. */
+        uint32_t woff[4]={0,4,8,12};uint16_t windex[12]={0,1,2,3,0,1,2,3,0,1,2,3};
+        sm64ds_collision_t ww={water_prisms,woff,windex,4,3,1,0,0,0u,(1u<<2)};
+        int32_t surface=0;
+        assert(sm64ds_water_surface(&ww,30*O,10*O,-20*O,&surface)&&surface==0);
+        assert(!sm64ds_water_surface(&ww,30*O,10*O,O,&surface));
         sm64ds_player_t wp={.spawn={5*O,2*O,10*O}};
         sm64ds_player_reset(&wp);
         sm64ds_player_step(&wp,&ww,0,0,0,0);
         assert(wp.grounded&&!wp.swimming&&wp.feet.y==2*O);
-        int32_t water_enter_x=0,swim_steps=0;
-        for(int i=0;i<220;++i) {
+        wp.yaw=0x4000;   /* the caller's facing: +x */
+        int32_t swim_steps=0,lowest=0;
+        for(int i=0;i<400&&(wp.swimming||!swim_steps);++i) {
+            wp.swim_stroke_held=(uint8_t)(swim_steps>0);
             sm64ds_player_step(&wp,&ww,O,0,0,1);
             if(wp.swimming) {
-                if(!swim_steps)water_enter_x=wp.feet.x;
                 ++swim_steps;
+                assert(wp.feet.y>=-20*O&&wp.feet.y<=float_y);   /* in the water */
+                if(wp.feet.y<lowest)lowest=wp.feet.y;
             }
         }
         assert(swim_steps>20);                    /* time spent in the bay */
-        assert(wp.feet.y==0);                     /* floated at the surface */
-        assert(wp.feet.x>=water_enter_x+40*O);   /* swimmer crossed the bay */
-        assert(!wp.swimming&&wp.feet.y==2*O&&wp.feet.x>=40*O);   /* climbed out */
-        assert(wp.resets==1&&!wp.dead);          /* water never killed Mario */
-        /* A stroke from the water lifts the feet out of the surface contact. */
+        assert(lowest<float_y-O);                 /* the fall carried under the float */
+        assert(!wp.swimming&&wp.grounded&&wp.feet.y==-4*O&&wp.feet.x>=40*O); /* waded out */
+        assert(wp.resets==1&&!wp.dead);
+        /* Idle in the bay: the drift lifts the swimmer to the float, and the
+         * surface restores health. */
         sm64ds_player_reset(&wp);
-        assert(sm64ds_floor(&ww,10*O,10*O,100*O,&water_enter_x));
-        wp.feet.y=water_enter_x;
+        wp.feet=(sat_vec3_t){30*O,-12*O,10*O};wp.health=4;
+        sm64ds_player_step(&wp,&ww,0,0,0,0);
+        assert(wp.swimming);
+        wp.swim_stroke_held=0;
+        for(int i=0;i<600;++i)sm64ds_player_step(&wp,&ww,0,0,0,0);
+        assert(wp.swimming&&wp.feet.y==float_y&&wp.feet.x==30*O);
+        assert(wp.health==wp.max_health);
+        /* The d-pad turns the swimmer. */
+        uint16_t yaw_before=wp.yaw;
+        wp.swim_turn=1;
+        for(int i=0;i<30;++i)sm64ds_player_step(&wp,&ww,0,0,0,0);
+        wp.swim_turn=0;
+        assert((int16_t)(wp.yaw-yaw_before)<-0x800);   /* right turns clockwise */
+        /* A jump at the float with the pad held back leaves the water. */
+        uint32_t jumps=wp.jumps;
+        wp.swim_pitch=1;
         sm64ds_player_step(&wp,&ww,0,0,1,0);
-        assert(wp.jumps>=1&&wp.velocity_y>0);
+        assert(!wp.swimming&&wp.jumps==jumps+1&&wp.velocity_y>0);
+        wp.swim_pitch=0;
     }
     puts("floor, ledge, wall, jump, ceiling, landing, camera, slope, void reset and water swimming passed");
     return 0;

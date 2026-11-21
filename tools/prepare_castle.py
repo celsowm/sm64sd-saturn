@@ -1213,13 +1213,21 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     (out / 'castle_scene.h').write_text('\n'.join(header) + '\n')
     (out / 'castle_scene.c').write_text('\n'.join(code))
 
+    # A level with a water surface also needs Mario's swim stroke and float.
+    mario_clips = []
+    if water_layers:
+        mario_clips = [f'--clip={c}' for c in (
+            'idle=ARCHIVE/arc0.narc:179', 'walk=ARCHIVE/arc0.narc:180',
+            'run=ARCHIVE/arc0.narc:145', 'jump=ARCHIVE/arc0.narc:120',
+            'swim=data/player/swim.bca', 'swim_wait=data/player/swim_wait.bca')]
     if lut4:
-        convert(['--rom', str(rom), '--out', str(out), '--tile-size', '24', '--lut4', '--adaptive-size'])
+        convert(['--rom', str(rom), '--out', str(out), '--tile-size', '24', '--lut4', '--adaptive-size',
+                 *mario_clips])
         if not is_interior:
             convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', sky_model,
                      '--name', 'skybox_preview', '--tile-size', '16', '--lut4', '--subdivide-sky'])
     else:
-        convert(['--rom', str(rom), '--out', str(out), '--tile-size', '24'])
+        convert(['--rom', str(rom), '--out', str(out), '--tile-size', '24', *mario_clips])
         if not is_interior:
             convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', sky_model,
                      '--name', 'skybox_preview'])
