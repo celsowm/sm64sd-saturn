@@ -1,0 +1,6 @@
+# Bob-omb Battlefield: from the spawn (world -398,406, camera yaw 135) walk
+# the coin line at z=352, x=-42..35 (coins 5..9, ~96 units away). Yaw 135,
+# DOWN heads (+0.707,+0.707) and reaches z=352 after ~70 units.
+0 NONE
+20 DOWN
+150 NONE

@@ -6,7 +6,7 @@ from pathlib import Path
 import struct
 import subprocess
 
-FIELDS='magic frames ticks jumps landings wall_hits resets x y z velocity_y camera_x camera_y camera_z target_x target_y target_z grounded clip commands skipped faces paused culled clipped fallback sky_clip_candidates castle_clip_candidates body_clip_candidates head_clip_candidates texture_arena_initial texture_arena_remaining texture_estimate requested_yaw actual_camera_yaw camera_clearance mario_facing camera_fov_y'.split()
+FIELDS='magic frames ticks jumps landings wall_hits resets x y z velocity_y camera_x camera_y camera_z target_x target_y target_z grounded clip commands skipped faces paused culled clipped fallback sky_clip_candidates castle_clip_candidates body_clip_candidates head_clip_candidates texture_arena_initial texture_arena_remaining texture_estimate health max_health dead coins star_bits boss_hp boss_state boss_held boss_x boss_y boss_z requested_yaw actual_camera_yaw camera_clearance mario_facing camera_fov_y'.split()
 
 
 def check(elf, wram, nm, scenario):
@@ -18,7 +18,18 @@ def check(elf, wram, nm, scenario):
     data=wram.read_bytes()
     if len(data)!=1024*1024: raise ValueError('expected a complete High WRAM dump')
     offset=symbols['g_sm64ds_castle_stats']-0x06000000
-    report=dict(zip(FIELDS,struct.unpack_from(f'>{len(FIELDS)}i',data,offset)))
+    # The header must have been extended in lockstep with the C struct; a
+    # stale field list silently shifts every later value.
+    assert len(FIELDS)==len(set(FIELDS)), 'duplicate telemetry field'
+    assert len(FIELDS)==49, "telemetry field count is %d, expected 49" % len(FIELDS)
+    # SH-2 is big-endian and the struct is uint32_t/int32_t only.
+    report=dict(zip(FIELDS,struct.unpack_from(f'>{len(FIELDS)}I',data,offset)))
+    for name in ('x','y','z','velocity_y','camera_x','camera_y','camera_z',
+                 'target_x','target_y','target_z','mario_facing','camera_fov_y',
+                 'camera_clearance','boss_x','boss_y','boss_z'):
+        v=report[name]
+        report[name]=v-2**32 if v>=2**31 else v   # signed 16.16 in the raw view
+        report[name+'_units']=report[name]/65536
     panic=struct.unpack_from('>I',data,symbols['g_sat_last_panic']-0x06000000)[0]
     assert report['magic']==0x43415331 and report['frames']>0, 'no completed castle frame'
     assert panic!=0x50414e43, 'runtime panic recorded'
@@ -37,6 +48,10 @@ def check(elf, wram, nm, scenario):
                  'camera_clearance'):
         report[name+'_units']=report[name]/65536
     report.update(scenario=scenario,panic=False)
+    # Endianness guard: SH-2 words are big-endian, so reading with '<' would
+    # swap every field (magic 0x53414350 read as 0x50434153) and give
+    # nonsense positions instead of failing loudly.
+    assert report['magic']==0x43415331, 'telemetry read with the wrong endianness'
     return report
 
 

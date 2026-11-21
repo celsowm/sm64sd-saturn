@@ -54,6 +54,22 @@ class PlayTests(unittest.TestCase):
             with self.assertRaises(FormatError):decode_kcl(b)
         with self.assertRaises(FormatError):decode_kcl(fixture()[:-1])
 
+    def test_normal_table_alignment_padding_is_accepted(self):
+        b=fixture()
+        padded=bytearray(b[:92]+b'\0\0'+b[92:])
+        struct.pack_into('<2I',padded,8,78,110)
+        p,=decode_kcl(bytes(padded))
+        self.assertEqual(p.attribute,7)
+
+    def test_degenerate_prism_is_dropped_and_counted(self):
+        b=bytearray(fixture())
+        extra=struct.pack('<i6H',64000,0,0,0,0,0,9)
+        struct.pack_into('<I',b,12,124)
+        stats={}
+        prisms=decode_kcl(bytes(b)+extra,stats=stats)
+        self.assertEqual(len(prisms),1)
+        self.assertEqual(stats['degenerate'],[(108,9)])
+
     @unittest.skipUnless(shutil.which('cc'),'C compiler missing')
     def test_native_player_contacts_and_lifecycle(self):
         with tempfile.TemporaryDirectory() as tmp:

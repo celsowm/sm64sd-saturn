@@ -11,10 +11,14 @@ from sm64ds_pipeline.bmd import convert_bmd
 from sm64ds_pipeline.cli import main as convert
 from sm64ds_pipeline.emit import emit_model
 from sm64ds_pipeline.kcl import decode_kcl
+from sm64ds_pipeline.actor_model import bake_actor
+from sm64ds_pipeline.level import actor_placements, level_props, read_level, stage_overlay
+from actor_registry import ACTORS
+from stage_table import BY_NAME, STAGES, castle_1f_entrance
 from sm64ds_pipeline.sdat import SdatArchive, resample_wave_s8
 from sm64ds_pipeline.skybox import emit_skybox
 from sm64ds_pipeline.sky_panorama import emit_sky_panorama
-from sm64ds_pipeline.textures import bake_face, index_bakes, index_bakes_lut4, BakedTexture
+from sm64ds_pipeline.textures import SourceTexture, bake_face, index_bakes, index_bakes_lut4, BakedTexture
 from sm64ds_pipeline.subdivide import cut_faces_against_boxes, split_large_faces, split_long_edges
 from sm64ds_pipeline.sdk_split import split_nearby
 from sm64ds_pipeline.quad_merge import merge_coplanar_quads
@@ -23,10 +27,10 @@ from sm64ds_pipeline.support_planes import support_planes
 from sm64ds_pipeline.skinning import rest_world, mv
 from sm64ds_pipeline.level_objects import (
     CASTLE_1F_OVERLAY_ID,
+    DS_TO_SATURN_SCALE,
     CASTLE_GROUNDS_OVERLAY_ID,
     extract_castle_1f_objects,
-    extract_castle_props,
-    extract_clps_slippery_mask,
+    extract_clps_masks,
 )
 
 
@@ -58,9 +62,9 @@ def hex_array(values, size=12):
     return '\n'.join(','.join(f'0x{v:04x}' for v in values[i:i + size]) + ',' for i in range(0, len(values), size))
 
 
-def _build_castle_props(fs: Filesystem):
-    """Extract Castle Grounds billboard trees and wooden signs as compact LUT4 assets."""
-    trees, signs = extract_castle_props(fs)
+def _build_castle_props(fs: Filesystem, stage: str):
+    """Billboard trees and wooden signs of an outdoor stage as compact LUT4 assets."""
+    trees, signs = level_props(fs, stage)
 
     # Billboard tree: derive exact world quad extents from bomb_tree.bmd at 0.5x actor scale
     # and crop transparent horizontal/vertical margins to an 8-aligned VDP1 LUT4 sprite.
@@ -188,6 +192,58 @@ def _build_castle_props(fs: Filesystem):
         'castle_tree_texture_bytes': tree_bytes,
         'castle_sign_texture_bytes': sign_bytes,
     }
+
+
+def _painting_box(p, fx):
+    """Axis-aligned trigger box in front of a wall painting (Saturn units)."""
+    x, y, z = p.position
+    half, depth = p.width / 2 + 4.0, 16.0
+    if p.yaw_deg in (90, 270):
+        xs, zs = (x - depth, x + depth), (z - half, z + half)
+    else:
+        xs, zs = (x - half, x + half), (z - depth, z + depth)
+    return (fx(xs[0]), fx(y - 30.0), fx(zs[0]), fx(xs[1]), fx(y + p.height + 8.0), fx(zs[1]))
+
+
+EMPTY_BOX = (1, 1, 1, 0, 0, 0)   # min > max: never triggers (hotkey-only target)
+
+
+def _stage_warps(stage, stage_entrance, warp_target, c1f_objs, fx):
+    """(entrances, warps): spawn points by id and trigger boxes to other stages.
+
+    Entrance ids: 0 default, 1 return from the other castle stage, 2 intro
+    (castle only), 3 and up: returns from courses. A warp is
+    (box, target binary, entrance id in the target, needs-air flag).
+    """
+    if stage == 'castle_1f':
+        spawn = (fx(-64.0), fx(64.0), fx(24.0), 0, 180)
+        entrances = [spawn, spawn, spawn]
+        warps = [((fx(-78.0), fx(-4.0), fx(124.0), fx(-50.0), fx(18.0), fx(144.0)),
+                  warp_target or '0.BIN', 1, 0)]
+        for st in (t for t in STAGES if t.enabled and t.painting and t.name != 'main_garden'):
+            pt = next(p for p in c1f_objs.paintings if p.model_path.endswith(f'{st.painting}.bmd'))
+            nx, nz = math.sin(math.radians(pt.yaw_deg)), math.cos(math.radians(pt.yaw_deg))  # wall normal
+            entrances.append((fx(pt.position[0] + 30.0 * nx), fx(pt.position[2] + 30.0 * nz),
+                              fx(pt.position[1] + 64.0), pt.yaw_deg, (pt.yaw_deg + 180) % 360))
+            warps.append((_painting_box(pt, fx), f'{st.bin}.BIN', 0, 0))
+        return entrances, warps
+    if stage_entrance is None:  # Castle Grounds
+        spawn = (fx(0.0), fx(256.0), fx(512.0), 0, 180)
+        ret = (fx(0.0), fx(-18.0), fx(80.0), 180, 0)
+        return [spawn, ret, spawn], [((fx(-16.0), fx(44.0), fx(-74.0), fx(16.0), fx(66.0), fx(-58.0)),
+                                      warp_target or 'C1F.BIN', 0, 0)]
+    ex, ey, ez, eyaw = stage_entrance
+    # Boss-rush spawn: stand on the summit arena floor just below the boss's
+    # authored position, so he is reachable without a climb. The arena floor
+    # is the KCL height at the boss's XZ, which the model bounds cannot give.
+    # The spawn override (if any) already gives the floor Y; _stage_warps
+    # adds +512 for the drop-in height above it.
+    spawn = (fx(ex), fx(ez), fx(ey + 512.0), eyaw, (eyaw + 180) % 360)
+    # The courtyard has no course painting, so it has no 1F return entrance:
+    # its return warp is inert (an empty box never fires).
+    if not BY_NAME[stage].painting:
+        return [spawn, spawn, spawn], [(EMPTY_BOX, 'C1F.BIN', 0, 0)]
+    return [spawn, spawn, spawn], [(EMPTY_BOX, 'C1F.BIN', castle_1f_entrance(stage), 0)]
 
 
 def _build_castle_1f_props(fs: Filesystem):
@@ -556,10 +612,23 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             adaptive_priorities=None, stitch_sources=(), stitch_cross_sources=(),
             pack_split_quads=False, vertex_colors=False, merge_quads=False, lut4=False,
             max_edge=0.0, max_edge_radius=0.0, max_tile_size=48, stage='main_castle',
-            chunk_size=0.0, warp_target='', with_intro_props=False):
-    if stage not in ('main_castle', 'castle_1f'):
+            chunk_size=0.0, warp_target='', with_intro_props=False, actors=None, spawn=None):
+    if stage not in ('main_castle', 'castle_1f', 'bombhei_map', 'main_garden', 'battan_king_map',
+                     'kaizoku_irie'):
         raise ValueError(f'unsupported stage: {stage}')
     is_interior = (stage == 'castle_1f')
+    stage_entrance = stage_bin = None
+    sky_model = 'data/vrbox/vr02.bmd'
+    if stage not in ('main_castle', 'castle_1f'):
+        lv = read_level(Filesystem.from_file(rom), stage)
+        e = lv.lists(1)[0].records[0]   # entrance 0: (id, x, y, z, rx, ry, rz, param)
+        k = DS_TO_SATURN_SCALE
+        stage_entrance = (e[1] * k, e[2] * k, e[3] * k, round(e[5] * 360 / 65536) % 360)
+        if (spawn):   # test builds: x z y in Saturn units
+            stage_entrance = (spawn[0], spawn[2], spawn[1], stage_entrance[3])
+        stage_bin = BY_NAME[stage].bin
+        if lv.skybox_id:
+            sky_model = f'data/vrbox/vr{lv.skybox_id + 1:02d}.bmd'   # sky table: id k -> vr(k+1)
     fs = Filesystem.from_file(rom)
     bmd_path = f'data/stage/{stage}/{stage}_all.bmd'
     kcl_path = f'data/stage/{stage}/{stage}.kcl'
@@ -761,7 +830,10 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     if lut4:
         sources = [m.material_textures[mat] for mat in materials]
         if any(tex is None for tex in sources):
-            raise ValueError('LUT4 castle baking requires textured faces')
+            # A material with no texture is a flat-colour face (the garden has
+            # one). Bake a 1x1 grey source for it so the LUT4 path stays total.
+            sources = [tex if tex is not None else SourceTexture(1, 1, ((180, 180, 180, 255),))
+                       for tex in sources]
         priorities = json.loads(adaptive_priorities.read_text()) if adaptive_priorities else None
         if isinstance(priorities, dict):
             source_priorities = {int(face): weight for face, weight in priorities.items()}
@@ -822,69 +894,25 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     flat_faces = [i for i, face in enumerate(faces)
                   if len({fx(vertices[index][1]) for index in face}) == 1]
     planes = support_planes(vertices, faces)
-    header = ['#pragma once', '#include <saturn/model3d.h>', '#include <saturn/collide3d.h>', '#include "sm64ds_play.h"']
+    header = ['#pragma once', '#include <saturn/model3d.h>', '#include <saturn/collide3d.h>', '#include "sm64ds_play.h"', '#include "sm64ds_stage_handoff.h"']
     if is_interior:
         header += [
-            '#define CASTLE_STAGE_ID 1u',
-            '#define CASTLE_STAGE_NAME "C1F"',
             '#define CASTLE_HAS_SKYBOX 0',
-            f'#define CASTLE_SPAWN_X {fx(-64.0)}',
-            f'#define CASTLE_SPAWN_Y {fx(0.0)}',
-            f'#define CASTLE_SPAWN_Z {fx(64.0)}',
-            f'#define CASTLE_SPAWN_FLOOR_CEILING {fx(24.0)}',
-            '#define CASTLE_SPAWN_YAW 0',
-            '#define CASTLE_SPAWN_FACING 180',
-            f'#define CASTLE_RETURN_SPAWN_X {fx(-64.0)}',
-            f'#define CASTLE_RETURN_SPAWN_Z {fx(64.0)}',
-            f'#define CASTLE_RETURN_FLOOR_CEILING {fx(24.0)}',
-            '#define CASTLE_RETURN_YAW 0',
-            '#define CASTLE_RETURN_FACING 180',
-            '#define CASTLE_DEFAULT_CAM_DIST 52',
-            '#define CASTLE_CLOSE_CAM_DIST 32',
-            '#define CASTLE_BG_R 3',
-            '#define CASTLE_BG_G 4',
-            '#define CASTLE_BG_B 7',
             '#define CASTLE_WARP_AVAILABLE 1',
-            f'#define CASTLE_WARP_TARGET_BIN "{warp_target or "0.BIN"}"',
-            '#define CASTLE_WARP_TARGET_ENTRANCE 1u',
-            f'#define CASTLE_WARP_MIN_X {fx(-78.0)}',
-            f'#define CASTLE_WARP_MAX_X {fx(-50.0)}',
-            f'#define CASTLE_WARP_MIN_Y {fx(-4.0)}',
-            f'#define CASTLE_WARP_MAX_Y {fx(18.0)}',
-            f'#define CASTLE_WARP_MIN_Z {fx(124.0)}',
-            f'#define CASTLE_WARP_MAX_Z {fx(144.0)}',
+        ]
+    elif stage_entrance is not None:
+        # Generic outdoor course: spawn at the level's entrance 0, no warp yet.
+        ex, ey, ez, eyaw = stage_entrance
+        header += [
+            '#define CASTLE_HAS_SKYBOX 1',
+            '#define CASTLE_WARP_AVAILABLE 1',
         ]
     else:
         header += [
-            '#define CASTLE_STAGE_ID 0u',
-            '#define CASTLE_STAGE_NAME "EXT"',
             '#define CASTLE_HAS_SKYBOX 1',
-            f'#define CASTLE_SPAWN_X {fx(0.0)}',
-            f'#define CASTLE_SPAWN_Y {fx(100.0)}',
-            f'#define CASTLE_SPAWN_Z {fx(256.0)}',
-            f'#define CASTLE_SPAWN_FLOOR_CEILING {fx(512.0)}',
-            '#define CASTLE_SPAWN_YAW 0',
-            '#define CASTLE_SPAWN_FACING 180',
-            f'#define CASTLE_RETURN_SPAWN_X {fx(0.0)}',
-            f'#define CASTLE_RETURN_SPAWN_Z {fx(-18.0)}',
-            f'#define CASTLE_RETURN_FLOOR_CEILING {fx(80.0)}',
-            '#define CASTLE_RETURN_YAW 180',
-            '#define CASTLE_RETURN_FACING 0',
-            '#define CASTLE_DEFAULT_CAM_DIST 65',
-            '#define CASTLE_CLOSE_CAM_DIST 35',
-            '#define CASTLE_BG_R 12',
-            '#define CASTLE_BG_G 20',
-            '#define CASTLE_BG_B 30',
             '#define CASTLE_WARP_AVAILABLE 1',
-            f'#define CASTLE_WARP_TARGET_BIN "{warp_target or "C1F.BIN"}"',
-            '#define CASTLE_WARP_TARGET_ENTRANCE 0u',
-            f'#define CASTLE_WARP_MIN_X {fx(-16.0)}',
-            f'#define CASTLE_WARP_MAX_X {fx(16.0)}',
-            f'#define CASTLE_WARP_MIN_Y {fx(44.0)}',
-            f'#define CASTLE_WARP_MAX_Y {fx(66.0)}',
-            f'#define CASTLE_WARP_MIN_Z {fx(-74.0)}',
-            f'#define CASTLE_WARP_MAX_Z {fx(-58.0)}',
         ]
+    # Below the lowest collision/model vertex there is nothing to land on: reset.
     header += [f'#define CASTLE_VERTEX_COUNT {len(vertices)}u', f'#define CASTLE_FACE_COUNT {len(faces)}u',
                '#define CASTLE_FACE_SOURCE_AVAILABLE 1',
                '#define CASTLE_FLAT_FACE_LIST_AVAILABLE 1',
@@ -957,21 +985,22 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     for b in bins:
         indices.extend(b)
         offsets.append(len(indices))
-    slippery_mask = extract_clps_slippery_mask(
-        fs, CASTLE_1F_OVERLAY_ID if is_interior else CASTLE_GROUNDS_OVERLAY_ID
+    slippery_mask, water_mask = extract_clps_masks(
+        fs, CASTLE_1F_OVERLAY_ID if is_interior else
+        CASTLE_GROUNDS_OVERLAY_ID if stage_entrance is None else stage_overlay(fs, stage)
     )
     code += ['static const uint32_t offsets[]={', array(offsets), '};',
              'static const uint16_t collision_indices[]={', array(indices), '};',
              'const sm64ds_collision_t castle_collision={.prisms=prisms,.offsets=offsets,.indices=collision_indices,',
              f'.count={len(prisms)},.nx={nx},.nz={nz},.origin_x={fx(ox)},.origin_z={fx(oz)},'
-             f'.slippery_attrs=0x{slippery_mask:08x}u' + '};', '']
+             f'.slippery_attrs=0x{slippery_mask:08x}u,.water_attrs=0x{water_mask:08x}u' + '};', '']
     props_report = {}
     c1f_objs = None
     if lut4:
         if is_interior:
             prop_h, prop_c, c1f_objs, props_report = _build_castle_1f_props(fs)
         else:
-            prop_h, prop_c, props_report = _build_castle_props(fs)
+            prop_h, prop_c, props_report = _build_castle_props(fs, stage)
         header.extend(prop_h)
         code.extend(prop_c)
         code.append('')
@@ -1071,22 +1100,61 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     props_report['clps_slippery_mask'] = f'0x{slippery_mask:08x}'
     if with_intro_props and not is_interior:
         header += ['#define CASTLE_INTRO_PROPS_AVAILABLE 1']
+    actor_report = []
+    kinds = BY_NAME[stage].actors if actors is None else tuple(actors)
+    if stage_entrance is not None and kinds:
+        placed = actor_placements(fs, stage, {k: (ACTORS[k].source or k, ACTORS[k].only_star) for k in kinds})
+        header += ['#include "sm64ds_actors.h"', '#define CASTLE_ACTOR_KINDS_AVAILABLE 1',
+                   f'#define CASTLE_ACTOR_KIND_COUNT {len(kinds)}u']
+        for kind in kinds:
+            spec = ACTORS[kind]
+            src, rep = bake_actor(fs, kind.lower(), spec.bmd,
+                                  [(x, y + spec.lift, z, yaw) for x, y, z, yaw in placed[kind]], scale=spec.scale,
+                                  byte_budget=spec.byte_budget, max_size=spec.max_size,
+                                  max_depth=spec.max_depth, one_sided=spec.one_sided, behavior=spec.behavior,
+                                  speed=spec.speed, range_=spec.range_, radius=spec.radius,
+                                  fuse_steps=spec.fuse_steps, blast=spec.blast, hp=spec.hp, top=spec.top,
+                                  stun_steps=spec.stun_steps, unlock_by=spec.unlock_by, coin_value=spec.coin_value,
+                                  star_bit=spec.star_bit)
+            (out / f'actor_{kind.lower()}.c').write_text(src)
+            actor_report.append(rep)
+            header.append(f'extern sm64ds_actor_kind_t actor_kind_{kind.lower()};')
+        # Scene face slots reserved for actors (~150 B each in Low WRAM); the draw drops
+        # placements that no longer fit, nearest-first by list order.
+        header.append(f'#define CASTLE_ACTOR_FACE_CAP {min(640, sum(r["faces"] * r["count"] for r in actor_report))}u')
+        header.append('extern sm64ds_actor_kind_t *const castle_actor_kinds[CASTLE_ACTOR_KIND_COUNT];')
+        code += ['sm64ds_actor_kind_t *const castle_actor_kinds[]={'] + [
+            f'  &actor_kind_{k.lower()},' for k in kinds] + ['};', '']
+        props_report['actor_kinds'] = actor_report
+    entrances, warps = _stage_warps(stage, stage_entrance, warp_target, c1f_objs, fx)
+    desc = {'castle_1f': ('C1F', 1, (3, 4, 7), 52, 32)}.get(stage) or (
+        ('EXT', 0, (12, 20, 30), 65, 35) if stage_entrance is None else (stage_bin, 2, (12, 20, 30), 65, 35))
+    kill_y = fx(min(v[1] for v in vertices) - 64.0)   # nothing below the lowest vertex to land on
+    header += ['extern const sm64ds_entrance_t castle_entrances[];', 'extern const sm64ds_warp_t castle_warps[];',
+               'extern const sm64ds_stage_desc_t castle_stage;']
+    code += ['const sm64ds_entrance_t castle_entrances[]={'] + [
+        f'  {{{x},{z},{fc},{yaw},{facing}}},' for x, z, fc, yaw, facing in entrances] + ['};',
+        'const sm64ds_warp_t castle_warps[]={'] + [
+        f'  {{{{{b[0]},{b[1]},{b[2]}}},{{{b[3]},{b[4]},{b[5]}}},"{target}",{ent}u,{air}u}},'
+        for b, target, ent, air in warps] + ['};',
+        f'const sm64ds_stage_desc_t castle_stage={{"{desc[0]}",{desc[1]}u,{{{desc[2][0]},{desc[2][1]},{desc[2][2]}}},'
+        f'{desc[3]},{desc[4]},{BY_NAME[stage].far_cull if stage in BY_NAME else 0},{kill_y},{len(entrances)}u,{len(warps)}u,castle_entrances,castle_warps}};', '']
     (out / 'castle_scene.h').write_text('\n'.join(header) + '\n')
     (out / 'castle_scene.c').write_text('\n'.join(code))
 
     if lut4:
         convert(['--rom', str(rom), '--out', str(out), '--tile-size', '24', '--lut4', '--adaptive-size'])
         if not is_interior:
-            convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', 'data/vrbox/vr02.bmd',
+            convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', sky_model,
                      '--name', 'skybox_preview', '--tile-size', '16', '--lut4', '--subdivide-sky'])
     else:
         convert(['--rom', str(rom), '--out', str(out), '--tile-size', '24'])
         if not is_interior:
-            convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', 'data/vrbox/vr02.bmd',
+            convert(['--rom', str(rom), '--out', str(out), '--kind', 'skybox', '--model', sky_model,
                      '--name', 'skybox_preview'])
     if not is_interior:
         # VDP2 sky for the default build; skybox_preview stays for diagnostics.
-        sh, sc, sky_report = emit_sky_panorama(convert_bmd(fs.read('data/vrbox/vr02.bmd')), 'sky_panorama')
+        sh, sc, sky_report = emit_sky_panorama(convert_bmd(fs.read(sky_model)), 'sky_panorama')
         (out / 'sky_panorama.h').write_text(sh)
         (out / 'sky_panorama.c').write_text(sc)
         (out / 'sky_panorama.json').write_text(json.dumps(sky_report, indent=2) + '\n')
@@ -1222,8 +1290,13 @@ if __name__ == '__main__':
     p.add_argument('--stitch-cross-source', type=int, nargs=2, action='append', default=[], metavar=('FACE_A', 'FACE_B'), help='Experimentally stitch shared edges between two source faces')
     p.add_argument('--texture-budget', type=int, default=96 * 1024, help='Adaptive castle pixel budget in bytes')
     p.add_argument('--texture-samples', type=int, choices=(1, 2, 4), default=1, help='Samples per axis for filtered castle bakes')
-    p.add_argument('--stage', choices=('main_castle', 'castle_1f'), default='main_castle', help='Castle stage to export')
+    p.add_argument('--stage', choices=('main_castle', 'castle_1f', 'bombhei_map', 'main_garden',
+                                       'battan_king_map', 'kaizoku_irie'),
+                   default='main_castle', help='Castle stage to export')
     p.add_argument('--chunk-size', type=float, default=0, help='Partition exterior world into XZ spatial chunks of this size for frustum culling')
+    p.add_argument('--spawn', nargs=3, type=float, default=None, metavar=('X', 'Z', 'Y'),
+                   help='Override the course spawn in Saturn units (X, Z, floor Y)')
+    p.add_argument('--actors', nargs='*', default=None, help='Override the stage table actor kinds')
     p.add_argument('--warp-target', default='', help='Override target binary name for stage warp (e.g. EXT.BIN)')
     p.add_argument('--with-intro-props', action='store_true', help='Also emit Lakitu, green warp pipe, and opening SFX for Act III cutscene')
     a = p.parse_args()
@@ -1231,4 +1304,4 @@ if __name__ == '__main__':
             a.libsaturn_source, a.split_radius, a.adaptive_faces, a.texture_budget, a.texture_samples,
             a.refine_face, a.refine_grid, a.refine_manifest, a.adaptive_priorities, a.stitch_source, a.stitch_cross_source,
             a.pack_split_quads, a.vertex_colors, a.merge_quads, a.lut4, a.max_edge, a.max_edge_radius, a.max_tile_size,
-            a.stage, a.chunk_size, a.warp_target, a.with_intro_props)
+            a.stage, a.chunk_size, a.warp_target, a.with_intro_props, a.actors, a.spawn)

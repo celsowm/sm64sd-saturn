@@ -6,7 +6,6 @@ from .common import FormatError
 from .filesystem import Filesystem
 
 DS_TO_SATURN_SCALE = 0.064
-OBJ_ID_BOMB_TREE = 41
 OBJ_ID_PAINTING = 42
 OBJ_ID_TATEFUDA = 76
 OBJ_ID_KINOPIO = 80
@@ -122,59 +121,6 @@ def _ptr_to_off(ptr: int, ram_addr: int, size: int) -> int:
     return off
 
 
-def extract_castle_props(fs: Filesystem) -> tuple[list[LevelProp], list[LevelProp]]:
-    """Extract Castle Grounds exterior trees and wooden signs from overlay 9."""
-    ram_addr, data = read_arm9_overlay(fs, CASTLE_GROUNDS_OVERLAY_ID)
-    clps_off = data.find(b"CLPS")
-    if clps_off < 0x10:
-        raise FormatError("CLPS chunk not found in castle grounds overlay")
-
-    # LevelOverlay header immediately precedes the first CLPS block; the pointer
-    # 12 bytes before CLPS references the level's object-bank directory entry.
-    area_ptr = struct.unpack_from("<I", data, clps_off - 0x0C)[0]
-    area_off = _ptr_to_off(area_ptr, ram_addr, len(data))
-    bank_ptr = struct.unpack_from("<I", data, area_off)[0]
-    bank_off = _ptr_to_off(bank_ptr, ram_addr, len(data))
-    list_count, list_ptr = struct.unpack_from("<II", data, bank_off)
-    if not 1 <= list_count <= 32:
-        raise FormatError(f"unexpected castle object list count: {list_count}")
-    list_off = _ptr_to_off(list_ptr, ram_addr, len(data))
-
-    trees: list[LevelProp] = []
-    signs: list[LevelProp] = []
-    for i in range(list_count):
-        tag_type, obj_count, _pad, arr_ptr = struct.unpack_from("<BBHI", data, list_off + i * 8)
-        arr_off = _ptr_to_off(arr_ptr, ram_addr, len(data))
-        kind = tag_type & 0x1F
-        if kind == 5:  # Simple object: 8 bytes (id_and_param:u16, x:i16, y:i16, z:i16)
-            if arr_off + obj_count * 8 > len(data):
-                raise FormatError("simple object array exceeds overlay bounds")
-            for j in range(obj_count):
-                idp, x, y, z = struct.unpack_from("<Hhhh", data, arr_off + j * 8)
-                oid = idp & 0x1FF
-                param = idp >> 9
-                if oid == OBJ_ID_BOMB_TREE:
-                    trees.append(LevelProp(
-                        object_id=oid,
-                        position=(x * DS_TO_SATURN_SCALE, y * DS_TO_SATURN_SCALE, z * DS_TO_SATURN_SCALE),
-                        param=param,
-                    ))
-        elif kind == 0:  # Standard object: 16 bytes (id:u16, x/y/z:i16, rx/ry/rz:i16, param:u16)
-            if arr_off + obj_count * 16 > len(data):
-                raise FormatError("standard object array exceeds overlay bounds")
-            for j in range(obj_count):
-                oid, x, y, z, _rx, ry, _rz, param = struct.unpack_from("<HhhhhhhH", data, arr_off + j * 16)
-                if oid == OBJ_ID_TATEFUDA:
-                    yaw = round(ry * 360.0 / 65536.0) % 360
-                    signs.append(LevelProp(
-                        object_id=oid,
-                        position=(x * DS_TO_SATURN_SCALE, y * DS_TO_SATURN_SCALE, z * DS_TO_SATURN_SCALE),
-                        yaw_deg=yaw,
-                        param=param,
-                    ))
-    return trees, signs
-
-
 # Painting param high-byte -> NitroFS model path for Castle 1F course paintings.
 CASTLE_1F_PAINTING_MODELS = {
     0: "data/picture/for_bh.bmd",  # Bob-omb Battlefield (r1)
@@ -288,12 +234,13 @@ def extract_castle_1f_objects(fs: Filesystem) -> Castle1fObjects:
     return Castle1fObjects(doors=doors, paintings=paintings, toads=toads, toad_rooms=toad_rooms)
 
 
-def extract_clps_slippery_mask(fs: Filesystem, overlay_id: int) -> int:
-    """Return a bitmask of CLPS attribute indices marked traction=3 (unclimbable/slippery).
+def extract_clps_masks(fs: Filesystem, overlay_id: int) -> tuple[int, int]:
+    """Return (slippery, water) bitmasks of CLPS attribute indices (<32).
 
     SM64DS level overlays embed small 1-entry helper CLPS blocks for objects before
     the stage's main multi-entry CLPS table. Select the largest valid 8-byte-entry
-    CLPS chunk in the overlay and extract all indices < 32 with traction == 3.
+    CLPS chunk in the overlay, then extract every index whose traction is 3
+    (unclimbable/slippery) or whose word0 carries the water bit (0x20).
     """
     _ram_addr, data = read_arm9_overlay(fs, overlay_id)
     best_off = -1
@@ -312,10 +259,21 @@ def extract_clps_slippery_mask(fs: Filesystem, overlay_id: int) -> int:
             best_count = count
     if best_off < 0:
         raise FormatError(f"CLPS table not found in ARM9 overlay {overlay_id}")
-    mask = 0
+    slippery = water = 0
     for i in range(min(best_count, 32)):
         lo = struct.unpack_from("<I", data, best_off + i * 8)[0]
-        traction = (lo >> 12) & 0x7
-        if traction == 3:
-            mask |= 1 << i
-    return mask
+        if ((lo >> 12) & 0x7) == 3:
+            slippery |= 1 << i
+        if lo & 0x20:
+            water |= 1 << i
+    return slippery, water
+
+
+def extract_clps_slippery_mask(fs: Filesystem, overlay_id: int) -> int:
+    """Bitmask of CLPS indices marked traction=3 (unclimbable/slippery)."""
+    return extract_clps_masks(fs, overlay_id)[0]
+
+
+def extract_clps_water_mask(fs: Filesystem, overlay_id: int) -> int:
+    """Bitmask of CLPS indices whose word0 carries the water bit (0x20)."""
+    return extract_clps_masks(fs, overlay_id)[1]

@@ -1,0 +1,8 @@
+# Whomp's Fortress (WF.BIN): from the spawn, walk forward and jump once.
+# Mario starts on the fortress approach; the route exercises floor, the
+# first slope and the bridge line without touching a wall.
+0 NONE
+20 UP
+120 UP+A
+140 UP
+200 NONE

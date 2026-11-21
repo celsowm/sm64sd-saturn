@@ -1,0 +1,11 @@
+# Bob-omb Battlefield: from the spawn (-398,406, yaw 135) walk the lower
+# course to the Chain Chomp pen and on to the foot of the hill.
+# The probe spends its first ~70 fields booting, so the route starts at 70.
+# DOWN+B heads (+X,-Z); DOWN+LEFT heads +X; DOWN+RIGHT heads -Z.
+0 NONE
+70 DOWN+B
+340 DOWN+LEFT
+470 NONE
+490 DOWN+RIGHT
+720 DOWN+B
+840 NONE

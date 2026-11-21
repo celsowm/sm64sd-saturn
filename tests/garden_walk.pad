@@ -1,0 +1,8 @@
+# Castle Courtyard (GARDEN.BIN): from the spawn, walk forward and jump once.
+# Mario starts at the courtyard entrance; the route exercises floor, slope
+# and the first hedge line without touching a wall.
+0 NONE
+20 UP
+120 UP+A
+140 UP
+200 NONE

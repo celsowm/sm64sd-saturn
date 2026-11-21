@@ -15,7 +15,11 @@ import subprocess
 
 STAGES = 'vblank sim skin camera begin sky castle props actor support flush hud end'.split()
 HEADER = 'magic frequency_hz frames sim_steps max_sim_steps vdp1_draw_waits vdp1_draw_timeouts vdp1_late_swaps'.split()
-ROUTES = {'controls': ('castle_route.pad', 790), 'orbit': ('castle_orbit.pad', 720)}
+ROUTES = {'controls': ('castle_route.pad', 790), 'orbit': ('castle_orbit.pad', 720),
+          'bob_climb': ('bob_climb.pad', 400), 'bob_summit': ('bob_boss_fight.pad', 700),
+          'bob_route': ('bob_route.pad', 840), 'bob_orbit': ('bob_orbit.pad', 720),
+          'garden_walk': ('garden_walk.pad', 260), 'wf_walk': ('wf_walk.pad', 260),
+          'jrb_walk': ('jrb_walk.pad', 260), 'jrb_orbit': ('jrb_orbit.pad', 720)}
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -89,24 +93,30 @@ def main():
     p.add_argument('--probe', type=Path, default=ROOT.parent / 'lib-saturn/harness/build-macos/probe')
     p.add_argument('--bios', type=Path, default=ROOT.parent / 'lib-saturn/bios/firmware/mpr-17933.bin')
     p.add_argument('--nm', type=Path, default=ROOT.parent / 'saturn-tools/bin/sh2eb-elf-nm')
+    p.add_argument('--target', default='sm64ds_castle', help='CMake target, e.g. sm64ds_bob')
+    p.add_argument('--route-target', action='append', default=[],
+                   help='Override the CMake target for a route (repeatable, NAME=TARGET)')
     p.add_argument('--limit', type=int, default=20)
     p.add_argument('--skip-fields', type=int, default=120, help='boot/load fields left out of hot symbols')
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
-    elf = a.build_dir / 'sm64ds_castle.elf'
-    # The multi-stage disc needs the intro and 1F targets; the direct disc
-    # carries the same exterior data for an injection boot.
-    cue = a.build_dir / 'disc/sm64ds_castle.cue'
-    if not cue.exists():
-        cue = a.build_dir / 'disc/sm64ds_castle_direct.cue'
-    data, text = symbols(a.nm, elf)
     report = {}
     for name in a.routes:
         pad, fields = ROUTES[name]
         wram, pcs = a.out / f'{name}-wram.bin', a.out / f'{name}-pc.txt'
+        target = a.target
+        for override in a.route_target:
+            key, _, value = override.partition('=')
+            if key == name:
+                target = value
+        elf = a.build_dir / f'{target}.elf'
+        cue = a.build_dir / f'disc/{target}.cue'
+        if not cue.exists():
+            cue = a.build_dir / f'disc/{target}_direct.cue'
+        data, text = symbols(a.nm, elf)
         subprocess.run([str(x) for x in [
             a.probe, '--iso', cue,
-            '--bin', a.build_dir / 'sm64ds_castle.app.bin', '--bios', a.bios,
+            '--bin', a.build_dir / f'{target}.app.bin', '--bios', a.bios,
             '--boot-mode', 'injection', '--frames', fields,
             '--pad-script', ROOT / 'tests' / pad, '--out', a.out / f'{name}-probe.json',
             '--dump-wram-high', wram, '--profile-pc', pcs,

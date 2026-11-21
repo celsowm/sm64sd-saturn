@@ -49,6 +49,11 @@ endif()
 
 option(SM64DS_BUILD_CASTLE "Build the playable castle exterior" OFF)
 set(SM64DS_CASTLE_1F_DIR "" CACHE PATH "Optional generated directory for Castle 1F interior (packaged as C1F.BIN)")
+set(SM64DS_BOB_DIR "" CACHE PATH "Optional generated directory for Bob-omb Battlefield (packaged as BOB.BIN)")
+set(SM64DS_BOB_BOSS_DIR "" CACHE PATH "Optional generated Bob-omb Battlefield summit spawn (packaged as BOSS.BIN)")
+set(SM64DS_GARDEN_DIR "" CACHE PATH "Optional generated Castle Courtyard (packaged as GARDEN.BIN)")
+set(SM64DS_WF_DIR "" CACHE PATH "Optional generated Whomp's Fortress (packaged as WF.BIN)")
+set(SM64DS_JRB_DIR "" CACHE PATH "Optional generated Jolly Roger Bay (packaged as JRB.BIN)")
 set(SM64DS_INTRO_DIR "" CACHE PATH "Optional generated directory for SM64DS intro (packaged as 0.BIN)")
 option(SM64DS_VISUAL_DIAGNOSTICS "Enable deterministic visual diagnostic controls" OFF)
 option(SM64DS_VDP2_SKY "Draw the castle sky as a VDP2 panorama when sky_panorama.c was generated" ON)
@@ -104,7 +109,7 @@ if(SM64DS_BUILD_CASTLE)
     set(SM64DS_DIAG_EFFECTIVE_FACE_COUNT "CASTLE_FACE_COUNT")
   endif()
   set(_castle_sources
-    src/castle.c runtime/sm64ds_play.c
+    src/castle.c runtime/sm64ds_actors.c runtime/sm64ds_play.c
     runtime/sm64ds_pose.c runtime/sm64ds_background.c runtime/sm64ds_painter.c
     "${SM64DS_GENERATED_DIR}/mario_preview.c"
     "${SM64DS_GENERATED_DIR}/castle_scene.c"
@@ -181,7 +186,7 @@ if(SM64DS_BUILD_CASTLE)
   set(_castle_disc_root_files "")
   set(_castle_disc_deps "")
   if(SM64DS_CASTLE_1F_DIR AND EXISTS "${SM64DS_CASTLE_1F_DIR}/castle_scene.c")
-    add_executable(sm64ds_castle_1f src/castle.c runtime/sm64ds_play.c
+    add_executable(sm64ds_castle_1f src/castle.c runtime/sm64ds_actors.c runtime/sm64ds_play.c
       runtime/sm64ds_pose.c runtime/sm64ds_background.c runtime/sm64ds_painter.c
       "${SM64DS_CASTLE_1F_DIR}/mario_preview.c"
       "${SM64DS_CASTLE_1F_DIR}/castle_scene.c"
@@ -204,6 +209,69 @@ if(SM64DS_BUILD_CASTLE)
     add_custom_target(sm64ds_castle_1f_stage_bin DEPENDS "${_c1f_bin}")
     list(APPEND _castle_disc_root_files "${_c1f_bin}")
     list(APPEND _castle_disc_deps sm64ds_castle_1f_stage_bin)
+  endif()
+  # Generic stage: prepare_castle.py --stage <name> output in <dir>.
+  function(sm64ds_add_stage target dir bin)
+    set(_src src/castle.c runtime/sm64ds_play.c runtime/sm64ds_pose.c
+      runtime/sm64ds_background.c runtime/sm64ds_painter.c
+      runtime/sm64ds_actors.c
+      "${dir}/mario_preview.c" "${dir}/castle_scene.c" "${dir}/mario_head.c")
+    set(_sky 0)
+    if(SM64DS_VDP2_SKY AND EXISTS "${dir}/sky_panorama.c")
+      set(_sky 1)
+      list(APPEND _src "${dir}/sky_panorama.c")
+    else()
+      list(APPEND _src "${dir}/skybox_preview.c")
+    endif()
+    file(GLOB _actor_src "${dir}/actor_*.c")
+    list(APPEND _src runtime/sm64ds_actors.c ${_actor_src})
+    add_executable(${target} ${_src})
+    target_include_directories(${target} PRIVATE runtime "${dir}")
+    target_compile_definitions(${target} PRIVATE SM64DS_VDP2_SKY=${_sky}
+      SM64DS_VISUAL_DIAGNOSTICS=0 SM64DS_DIAG_SHOW_UI=0)
+    target_link_libraries(${target} PRIVATE LibSaturn::Saturn)
+    libsaturn_configure_executable(${target})
+    libsaturn_add_binary(${target})
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_stage_budget.py"
+        "$<TARGET_FILE:${target}>" --min-free-hwram 32768
+      COMMENT "Checking ${target} WRAM budget" VERBATIM)
+    libsaturn_add_disc(${target} NAME ${target})
+    set(_bin "${CMAKE_CURRENT_BINARY_DIR}/${bin}")
+    add_custom_command(OUTPUT "${_bin}"
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CMAKE_CURRENT_BINARY_DIR}/${target}.app.bin" "${_bin}"
+      DEPENDS ${target} VERBATIM)
+    add_custom_target(${target}_stage_bin DEPENDS "${_bin}")
+  endfunction()
+  if(SM64DS_BOB_DIR AND EXISTS "${SM64DS_BOB_DIR}/castle_scene.c")
+    sm64ds_add_stage(sm64ds_bob "${SM64DS_BOB_DIR}" BOB.BIN)
+    list(APPEND _castle_disc_root_files "${CMAKE_CURRENT_BINARY_DIR}/BOB.BIN")
+    list(APPEND _castle_disc_deps sm64ds_bob_stage_bin)
+  endif()
+  if(SM64DS_BOB_BOSS_DIR AND EXISTS "${SM64DS_BOB_BOSS_DIR}/castle_scene.c")
+    # Same course, Mario spawns at the summit: a short route to the boss.
+    sm64ds_add_stage(sm64ds_bob_boss "${SM64DS_BOB_BOSS_DIR}" BOSS.BIN)
+    list(APPEND _castle_disc_root_files "${CMAKE_CURRENT_BINARY_DIR}/BOSS.BIN")
+    list(APPEND _castle_disc_deps sm64ds_bob_boss_stage_bin)
+  endif()
+  if(SM64DS_GARDEN_DIR AND EXISTS "${SM64DS_GARDEN_DIR}/castle_scene.c")
+    # Phase-7 rollout stage 1: Castle Courtyard.
+    sm64ds_add_stage(sm64ds_garden "${SM64DS_GARDEN_DIR}" GARDEN.BIN)
+    list(APPEND _castle_disc_root_files "${CMAKE_CURRENT_BINARY_DIR}/GARDEN.BIN")
+    list(APPEND _castle_disc_deps sm64ds_garden_stage_bin)
+  endif()
+  if(SM64DS_WF_DIR AND EXISTS "${SM64DS_WF_DIR}/castle_scene.c")
+    # Phase-7 rollout stage 2: Whomp's Fortress.
+    sm64ds_add_stage(sm64ds_wf "${SM64DS_WF_DIR}" WF.BIN)
+    list(APPEND _castle_disc_root_files "${CMAKE_CURRENT_BINARY_DIR}/WF.BIN")
+    list(APPEND _castle_disc_deps sm64ds_wf_stage_bin)
+  endif()
+  if(SM64DS_JRB_DIR AND EXISTS "${SM64DS_JRB_DIR}/castle_scene.c")
+    # Phase-7 rollout stage 3: Jolly Roger Bay.
+    sm64ds_add_stage(sm64ds_jrb "${SM64DS_JRB_DIR}" JRB.BIN)
+    list(APPEND _castle_disc_root_files "${CMAKE_CURRENT_BINARY_DIR}/JRB.BIN")
+    list(APPEND _castle_disc_deps sm64ds_jrb_stage_bin)
   endif()
   if(SM64DS_INTRO_DIR AND EXISTS "${SM64DS_INTRO_DIR}/mario_face.c")
     add_executable(sm64ds_intro

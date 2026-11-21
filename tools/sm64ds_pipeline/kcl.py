@@ -26,18 +26,19 @@ class Prism:
     attribute: int
 
 
-def decode_kcl(blob: bytes, world_scale: float = 64.0) -> list[Prism]:
+def decode_kcl(blob: bytes, world_scale: float = 64.0, stats: dict | None = None) -> list[Prism]:
     data = lz77(blob)
     if len(data) < 56 or not math.isfinite(world_scale) or world_scale <= 0:
         raise FormatError('invalid KCL header/scale')
     p, n, t, end = struct.unpack_from('<4I', data)
     start = t + 16
-    if not (56 <= p <= n <= start < end <= len(data)) or (n-p)%12 or (start-n)%6 or (end-start)%16:
+    if not (56 <= p <= n <= start < end <= len(data)) or (n-p)%12 or (start-n)%6 > 3 or (end-start)%16:
         raise FormatError('invalid KCL table ranges')
     factor = world_scale / 64000
     points = [tuple(v*factor for v in row) for row in struct.iter_unpack('<3i', data[p:n])]
-    normals = [tuple(v/1024 for v in row) for row in struct.iter_unpack('<3h', data[n:start])]
+    normals = [tuple(v/1024 for v in row) for row in struct.iter_unpack('<3h', data[n:n+(start-n)//6*6])]
     result = []
+    degenerate = []
     for at in range(start, end, 16):
         length, pi, ni, e1, e2, e3, attribute = struct.unpack_from('<i6H', data, at)
         if pi >= len(points) or max(ni,e1,e2,e3) >= len(normals) or length <= 0:
@@ -48,7 +49,9 @@ def decode_kcl(blob: bytes, world_scale: float = 64.0) -> list[Prism]:
         d1, d2 = cross(edges[0], normal), cross(normal, edges[1])
         den1, den2 = dot(d1, edges[2]), dot(d2, edges[2])
         if min(abs(den1),abs(den2)) < 1e-8:
-            raise FormatError(f'degenerate KCL prism at {at}')
+            # The DS never produces a hit on a zero-area prism; drop and count.
+            degenerate.append((at, attribute))
+            continue
         b = tuple(a[i] + d1[i]*extent/den1 for i in range(3))
         c = tuple(a[i] + d2[i]*extent/den2 for i in range(3))
         if dot(cross(tuple(b[i]-a[i] for i in range(3)),tuple(c[i]-a[i] for i in range(3))),normal) < 0:
@@ -56,6 +59,8 @@ def decode_kcl(blob: bytes, world_scale: float = 64.0) -> list[Prism]:
         if any(not math.isfinite(v) or abs(v)>=32768 for point in (a,b,c) for v in point):
             raise FormatError('KCL vertex exceeds fixed-point world')
         result.append(Prism((a,b,c),normal,edges,extent,attribute))
+    if stats is not None:
+        stats['degenerate'] = degenerate
     if not result or len(result)>65535:
         raise FormatError('KCL prism count exceeds runtime capacity')
     return result

@@ -28,18 +28,26 @@ static int cell(const sm64ds_collision_t *w,int32_t x,int32_t z) {
  * remain freely walkable. */
 #define SLIPPERY_NORMAL_Y 61600
 #define STEEP_NORMAL_Y 42598
+/* Water: a CLPS with the water bit (word0 & 0x20). The DS player treats such a
+ * floor as the water surface (St_Swim_Main), never as solid ground. */
+#define WATER_SURFACE_PROBE (2*ONE)   /* vertical reach that keeps contact */
+#define WATER_STEP_UP (8*ONE)         /* ledge a swimmer can climb out of */
+#define WATER_SPEED (ONE/2)           /* swimming is half the walk speed */
 static int is_slippery_floor(const sm64ds_collision_t *w,const sm64ds_prism_t *p) {
     if (p->normal.y<STEEP_NORMAL_Y) return 1;
     if (p->attribute<32u && (w->slippery_attrs&(1u<<p->attribute)) &&
         p->normal.y<SLIPPERY_NORMAL_Y) return 1;
     return 0;
 }
+static int is_water_floor(const sm64ds_collision_t *w,const sm64ds_prism_t *p) {
+    return p->attribute<32u && (w->water_attrs&(1u<<p->attribute))!=0u;
+}
 static int floor_query(const sm64ds_collision_t *w,int32_t x,int32_t z,
                        int32_t ceiling,int32_t *height,sat_vec3_t *normal,
-                       uint8_t *slippery) {
+                       uint8_t *slippery,uint8_t *water) {
     int bin=cell(w,x,z),found=0;
     int32_t best=INT32_MIN;
-    uint8_t best_slippery=0;
+    uint8_t best_slippery=0,best_water=0;
     if(bin<0)return 0;
     for(uint32_t k=w->offsets[bin];k<w->offsets[bin+1];++k) {
         const sm64ds_prism_t *p=&w->prisms[w->indices[k]];
@@ -51,22 +59,26 @@ static int floor_query(const sm64ds_collision_t *w,int32_t x,int32_t z,
             best=y;found=1;
             if(normal)*normal=p->normal;
             best_slippery=(uint8_t)is_slippery_floor(w,p);
+            best_water=(uint8_t)is_water_floor(w,p);
         }
     }
     if(found) {
         *height=best;
         if(slippery)*slippery=best_slippery;
+        if(water)*water=best_water;
     }
     return found;
 }
 int sm64ds_floor(const sm64ds_collision_t *w,int32_t x,int32_t z,
                  int32_t ceiling,int32_t *height) {
-    return floor_query(w,x,z,ceiling,height,0,0);
+    return floor_query(w,x,z,ceiling,height,0,0,0);
 }
 int sm64ds_floor_normal(const sm64ds_collision_t *w,int32_t x,int32_t z,
                         int32_t ceiling,int32_t *height,sat_vec3_t *normal) {
+    uint8_t slippery=0,water=0;
     if(!normal) return 0;
-    return floor_query(w,x,z,ceiling,height,normal,0);
+    if(!floor_query(w,x,z,ceiling,height,normal,&slippery,&water)) return 0;
+    return water?0:1;   /* a water surface has no usable walk normal */
 }
 int32_t sm64ds_ground_pose_lift(const sat_vec3_t *vertices,uint16_t count,
                                 const sat_mat4_t *world,const sat_vec3_t *point,
@@ -86,15 +98,69 @@ int32_t sm64ds_ground_pose_lift(const sat_vec3_t *vertices,uint16_t count,
     return lift>INT32_MAX?INT32_MAX:(int32_t)lift;
 }
 void sm64ds_player_reset(sm64ds_player_t *p) {
-    p->feet=p->spawn;p->velocity_y=0;p->grounded=0;p->moving=0;p->running=0;++p->resets;
+    p->feet=p->spawn;p->velocity_y=0;p->knock_x=p->knock_z=0;p->grounded=0;p->moving=0;p->running=0;
+    p->swimming=0;
+    if(!p->max_health)p->max_health=SM64DS_PLAYER_MAX_HEALTH;
+    p->health=p->max_health;p->invuln=0;p->dead=0;p->death_timer=0;
+    p->held_yaw=0;
+    ++p->resets;
+}
+void sm64ds_player_hurt(sm64ds_player_t *p,uint8_t damage,
+                        int32_t push_x,int32_t push_z) {
+    if(p->dead||p->invuln)return;
+    if(!p->max_health)p->max_health=SM64DS_PLAYER_MAX_HEALTH;
+    if(damage>=p->health)p->health=0;
+    else p->health=(uint8_t)(p->health-damage);
+    p->knock_x=push_x;p->knock_z=push_z;
+    p->velocity_y=3*ONE;p->grounded=0;
+    if(!p->health) {
+        p->dead=1;p->death_timer=90;p->invuln=0;
+    } else p->invuln=45;
+}
+void sm64ds_player_heal(sm64ds_player_t *p,uint8_t amount) {
+    if(p->dead)return;
+    uint16_t total=(uint16_t)p->health+amount;
+    p->health=(uint8_t)(total>p->max_health?p->max_health:total);
+}
+void sm64ds_player_add_coins(sm64ds_player_t *p,uint16_t amount) {
+    uint16_t before=p->coins;
+    p->coins=(uint16_t)(before+amount);
+    if(p->coins/50u>before/50u)sm64ds_player_heal(p,1);
 }
 void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
                         int32_t dx,int32_t dz,uint8_t jump,uint8_t run) {
+    if(p->invuln)--p->invuln;
+    if(p->dead) {
+        if(--p->death_timer==0)sm64ds_player_reset(p);
+        return;
+    }
     ++p->ticks;
+    if (jump) p->held_yaw=0;   /* unused; kept for ABI stability */
+    if(p->knock_x||p->knock_z) {
+        dx+=p->knock_x;dz+=p->knock_z;
+        p->knock_x-=p->knock_x/8;p->knock_z-=p->knock_z/8;
+    }
     p->moving=dx!=0||dz!=0;p->running=p->moving&&run;
-    if(p->grounded) {
+    /* Water contact: the DS keeps the player at the water surface height while
+     * swimming, so a CLPS with the water bit floats instead of being stood on.
+     * The probe uses the ordinary STEP so a stroke above the surface leaves
+     * the water instead of snapping back into it. */
+    {
+        int32_t surface=0;uint8_t water=0;
+        if(floor_query(w,p->feet.x,p->feet.z,p->feet.y+STEP,&surface,0,0,&water) &&
+           water && p->feet.y<=surface+STEP) {
+            p->swimming=1;
+            p->feet.y=surface;
+            p->velocity_y=0;
+            p->grounded=1;
+        } else if(!water) p->swimming=0;
+    }
+    if(p->swimming) {
+        dx=mul(dx,WATER_SPEED);dz=mul(dz,WATER_SPEED);
+    }
+    if(p->grounded && !p->swimming) {
         int32_t cur_floor=0;sat_vec3_t cur_normal={0,ONE,0};uint8_t cur_slip=0;
-        if(floor_query(w,p->feet.x,p->feet.z,p->feet.y+STEP,&cur_floor,&cur_normal,&cur_slip) &&
+        if(floor_query(w,p->feet.x,p->feet.z,p->feet.y+STEP,&cur_floor,&cur_normal,&cur_slip,0) &&
            cur_slip && p->feet.y<=cur_floor+STEP) {
             jump=0;
             int64_t hsq=((int64_t)cur_normal.x*cur_normal.x+
@@ -114,8 +180,13 @@ void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
     }
     if(jump&&p->grounded) {p->velocity_y=3*ONE;p->grounded=0;++p->jumps;}
     int32_t old_y=p->feet.y;
-    p->velocity_y-=ONE/8;
-    if(p->velocity_y< -6*ONE)p->velocity_y=-6*ONE;
+    /* Swimming floats at the surface: no fall gravity is applied, and the
+     * step-up room is larger so a shore can be climbed out of. */
+    int32_t step_up=(p->swimming?WATER_STEP_UP:STEP);
+    if(!p->swimming) {
+        p->velocity_y-=ONE/8;
+        if(p->velocity_y< -6*ONE)p->velocity_y=-6*ONE;
+    }
     /* Substeps keep every movement shorter than the collision radius. */
     for(int step=0;step<4;++step) {
         p->feet.x+=dx/4;p->feet.z+=dz/4;p->feet.y+=p->velocity_y/4;
@@ -143,10 +214,10 @@ void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
                 }
             }
         }
-        int32_t floor;sat_vec3_t fnorm={0,ONE,0};uint8_t fslip=0;
-        int32_t limit=old_y+(p->grounded?STEP:ONE/4);
-        if(p->velocity_y<=0&&floor_query(w,p->feet.x,p->feet.z,limit,&floor,&fnorm,&fslip)&&
-           p->feet.y<=floor+(p->grounded?STEP:ONE/8)) {
+        int32_t floor=0;sat_vec3_t fnorm={0,ONE,0};uint8_t fslip=0,fwater=0;
+        int32_t limit=old_y+(p->grounded?step_up:ONE/4);
+        if(p->velocity_y<=0&&floor_query(w,p->feet.x,p->feet.z,limit,&floor,&fnorm,&fslip,&fwater)&&
+           p->feet.y<=floor+(p->grounded?step_up:ONE/8)) {
             if(!p->grounded) {
                 ++p->landings;
                 if(fslip) {
@@ -155,6 +226,7 @@ void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
                 }
             }
             p->feet.y=floor;p->velocity_y=0;p->grounded=1;
+            p->swimming=(uint8_t)(fwater?1:0);
         } else p->grounded=0;
     }
     if(p->feet.y< -160*ONE)sm64ds_player_reset(p);

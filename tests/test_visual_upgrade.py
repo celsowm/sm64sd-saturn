@@ -13,7 +13,8 @@ from sm64ds_pipeline.quad_merge import merge_coplanar_quads
 from sm64ds_pipeline.textures import SourceTexture, bake_face, index_bakes_lut4
 from sm64ds_pipeline.adaptive_bake import adaptive_lut4_bakes
 from sm64ds_pipeline.sdk_split import split_nearby
-from sm64ds_pipeline.level_objects import blz_decompress, extract_castle_props
+from sm64ds_pipeline.level import level_props
+from sm64ds_pipeline.level_objects import blz_decompress
 from sm64ds_pipeline.filesystem import Filesystem
 
 
@@ -145,7 +146,7 @@ class VisualUpgradeTests(unittest.TestCase):
         if not rom or not Path(rom).is_file():
             self.skipTest('SM64DS_ROM not set')
         fs = Filesystem.from_file(Path(rom))
-        trees, signs = extract_castle_props(fs)
+        trees, signs = level_props(fs, 'main_castle')
         self.assertEqual(len(trees), 21)
         self.assertEqual(len(signs), 5)
         # First wooden sign sits near Mario's starting path around (-102.4, 16.3, 346.2).

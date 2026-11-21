@@ -1,0 +1,6 @@
+# Castle 1F: walk from the spawn, jump once, stop before touching walls.
+0 NONE
+90 UP+B
+150 UP+B+A
+165 UP+B
+200 NONE

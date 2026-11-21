@@ -1,0 +1,5 @@
+# Bob-omb Battlefield: stand at the spawn and orbit the camera a full turn,
+# showing the whole lower course (spawn ledge, Chain Chomp pen, hill foot).
+0 NONE
+120 L
+600 NONE

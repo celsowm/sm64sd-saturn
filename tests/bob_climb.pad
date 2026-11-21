@@ -1,0 +1,5 @@
+# Bob-omb Battlefield: climb from the spawn to King Bob-omb at (96,268,-345).
+# From the spawn (-398,406) yaw 135: RIGHT heads toward +X/-Z (the hill).
+0 NONE
+20 RIGHT+B
+2400 NONE

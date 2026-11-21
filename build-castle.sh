@@ -17,11 +17,42 @@ python3 tools/prepare_castle.py --rom "$rom" --out private/castle_1f \
   --merge-quads --vertex-colors --lut4 \
   --max-edge 40 --max-tile-size 48 --texture-samples 2 \
   --texture-budget 245760
+python3 tools/prepare_castle.py --rom "$rom" --out private/bob \
+  --stage bombhei_map --merge-quads --vertex-colors --lut4 \
+  --max-edge 48 --chunk-size 128 --max-tile-size 48 --texture-samples 4 \
+  --texture-budget 245760
+# Castle Courtyard: first phase-7 rollout stage. Smaller and simpler than BoB.
+python3 tools/prepare_castle.py --rom "$rom" --out private/garden \
+  --stage main_garden --merge-quads --vertex-colors --lut4 \
+  --max-edge 48 --chunk-size 128 --max-tile-size 48 --texture-samples 4 \
+  --texture-budget 245760
+# Whomp's Fortress: phase-7 rollout stage 2.
+python3 tools/prepare_castle.py --rom "$rom" --out private/wf \
+  --stage battan_king_map --merge-quads --vertex-colors --lut4 \
+  --max-edge 48 --chunk-size 128 --max-tile-size 48 --texture-samples 4 \
+  --texture-budget 245760
+# Jolly Roger Bay: phase-7 rollout stage 3.
+python3 tools/prepare_castle.py --rom "$rom" --out private/jrb \
+  --stage kaizoku_irie --merge-quads --vertex-colors --lut4 \
+  --max-edge 112 --chunk-size 128 --max-tile-size 32 --texture-samples 2 \
+  --texture-budget 196608
+# Boss-rush variant: same course and actor kinds, Mario starts on the summit
+# arena floor (not the main entrance), so the King Bob-omb fight is one short
+# walk. The spawn override gives the arena floor Y at the boss's XZ (the KCL
+# height at (96, -345) is ~268; the +512 drop-in puts Mario just above it).
+python3 tools/prepare_castle.py --rom "$rom" --out private/bob_boss \
+  --stage bombhei_map --merge-quads --vertex-colors --lut4 \
+  --max-edge 48 --chunk-size 128 --max-tile-size 48 --texture-samples 4 \
+  --texture-budget 245760 --spawn 96 -345 268
 cmake -S . -B build/castle -G Ninja \
   "-DCMAKE_TOOLCHAIN_FILE=$source/cmake/toolchains/sh2eb-elf.cmake" \
   "-DLIBSATURN_TOOLCHAIN_ROOT=$compiler" "-DCMAKE_PREFIX_PATH=$sdk" \
   "-DSM64DS_GENERATED_DIR=$root/private/castle" \
   "-DSM64DS_CASTLE_1F_DIR=$root/private/castle_1f" \
-  "-DSM64DS_INTRO_DIR=$root/private/intro" \
+  "-DSM64DS_INTRO_DIR=$root/private/intro" "-DSM64DS_BOB_DIR=$root/private/bob" \
+  "-DSM64DS_BOB_BOSS_DIR=$root/private/bob_boss" \
+  "-DSM64DS_GARDEN_DIR=$root/private/garden" \
+  "-DSM64DS_WF_DIR=$root/private/wf" \
+  "-DSM64DS_JRB_DIR=$root/private/jrb" \
   -DSM64DS_BUILD_CASTLE=ON -DSM64DS_VISUAL_DIAGNOSTICS=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build build/castle --target sm64ds_intro_disc sm64ds_castle_disc sm64ds_castle_1f_disc --parallel 4
+cmake --build build/castle --target sm64ds_intro_disc sm64ds_castle_disc sm64ds_castle_1f_disc sm64ds_bob_stage_bin sm64ds_bob_disc sm64ds_bob_boss_stage_bin sm64ds_bob_boss_disc sm64ds_garden_stage_bin sm64ds_garden_disc sm64ds_wf_stage_bin sm64ds_wf_disc sm64ds_jrb_stage_bin sm64ds_jrb_disc --parallel 4
