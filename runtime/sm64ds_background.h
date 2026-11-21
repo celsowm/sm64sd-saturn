@@ -10,7 +10,11 @@ extern "C" {
 #endif
 
 #define SM64DS_BACKGROUND_PASS 0u
-#define SM64DS_ACTOR_PASS 1u
+/* A level with a water surface draws the side of it away from the camera, then
+ * the water, then the camera's side with the actors (ascending is drawn first). */
+#define SM64DS_FAR_WATER_PASS 1u
+#define SM64DS_WATER_PASS 2u
+#define SM64DS_ACTOR_PASS 3u
 
 typedef struct sm64ds_background_buffers {
     sat_vec3_t* vertices;

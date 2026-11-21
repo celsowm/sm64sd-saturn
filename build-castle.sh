@@ -35,7 +35,7 @@ python3 tools/prepare_castle.py --rom "$rom" --out private/wf \
 python3 tools/prepare_castle.py --rom "$rom" --out private/jrb \
   --stage kaizoku_irie --merge-quads --vertex-colors --lut4 \
   --max-edge 112 --chunk-size 128 --max-tile-size 32 --texture-samples 2 \
-  --texture-budget 196608
+  --texture-budget 196608 --water-layers
 # Boss-rush variant: same course and actor kinds, Mario starts on the summit
 # arena floor (not the main entrance), so the King Bob-omb fight is one short
 # walk. The spawn override gives the arena floor Y at the boss's XZ (the KCL

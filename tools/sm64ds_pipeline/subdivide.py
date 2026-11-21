@@ -312,3 +312,61 @@ def cut_faces_against_boxes(vertices, faces, uvs, materials, origins, source_set
             emit_poly(poly, mat, orig, srcs)
 
     return out_vertices, out_faces, out_uvs, out_materials, out_origins, out_source_sets, out_colors
+
+
+def cut_faces_at_height(vertices, faces, uvs, materials, origins, source_sets, height, cut,
+                        *, colors=None):
+    """Cut the faces listed in `cut` along the horizontal plane y = height into the
+    piece below it and the piece above it. Preserves UVs, vertex colors and the
+    face winding; other faces pass through unchanged.
+    """
+    out_vertices = list(vertices)
+    intern = {tuple(round(c, 8) for c in v): i for i, v in enumerate(vertices)}
+    out_faces = []
+    out_uvs = []
+    out_materials = []
+    out_origins = []
+    out_source_sets = []
+    out_colors = [] if colors is not None else None
+
+    def vertex(v):
+        key = tuple(round(c, 8) for c in v)
+        if key not in intern:
+            intern[key] = len(out_vertices)
+            out_vertices.append(key)
+        return intern[key]
+
+    def emit(face, uv, mat, orig, srcs, col):
+        out_faces.append(face)
+        out_uvs.append(uv)
+        out_materials.append(mat)
+        out_origins.append(orig)
+        out_source_sets.append(srcs)
+        if out_colors is not None:
+            out_colors.append(col)
+
+    for idx, (face, uv, mat, orig, srcs) in enumerate(zip(faces, uvs, materials, origins, source_sets)):
+        col = colors[idx] if colors is not None else None
+        if idx not in cut:
+            emit(face, uv, mat, orig, srcs, col)
+            continue
+        k = 3 if face[2] == face[3] else 4
+        poly0 = [
+            (vertices[face[j]], uv[j], tuple(float(ch) for ch in col[j]) if col is not None else None)
+            for j in range(k)
+        ]
+        for keep_le in (True, False):
+            poly = _clip_poly_axis(poly0, 1, height, keep_le)
+            # Pack the piece into quads and a triangle, as fans from vertex 0.
+            i = 1
+            while i + 1 < len(poly):
+                if i + 2 < len(poly):
+                    quad = (poly[0], poly[i], poly[i + 1], poly[i + 2])
+                    i += 2
+                else:
+                    quad = (poly[0], poly[i], poly[i + 1], poly[i + 1])
+                    i += 1
+                emit(tuple(vertex(pt[0]) for pt in quad), tuple(pt[1] for pt in quad), mat, orig, srcs,
+                     tuple(tuple(round(ch) for ch in pt[2]) for pt in quad) if col is not None else None)
+
+    return out_vertices, out_faces, out_uvs, out_materials, out_origins, out_source_sets, out_colors

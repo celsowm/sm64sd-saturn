@@ -16,12 +16,13 @@ from sm64ds_pipeline.level_objects import (
     extract_clps_slippery_mask,
 )
 from sm64ds_pipeline.quad_merge import merge_coplanar_quads
-from sm64ds_pipeline.subdivide import cut_faces_against_boxes, split_long_edges
+from sm64ds_pipeline.subdivide import cut_faces_against_boxes, cut_faces_at_height, split_long_edges
 from prepare_castle import (
     _compact_chunks,
     _compact_rooms,
     _compute_room_adjacency,
     _compute_room_portals,
+    _xz_near_polygon,
 )
 
 ROM = Path(os.environ["SM64DS_ROM"]) if "SM64DS_ROM" in os.environ else None
@@ -182,6 +183,48 @@ class Castle1fPipelineTests(unittest.TestCase):
             zs = [p[2] for p in pts]
             area += (max(xs) - min(xs)) * (max(zs) - min(zs))
         self.assertAlmostEqual(area, 9600.0, places=3)
+
+
+class WaterLayerTests(unittest.TestCase):
+    def test_cut_faces_at_height_splits_only_listed_faces(self):
+        # A wall from y=0 to y=20 cut at the water (y=8), and a second wall left whole.
+        verts = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 20.0, 0.0), (0.0, 20.0, 0.0),
+                 (0.0, 0.0, 5.0), (10.0, 0.0, 5.0), (10.0, 20.0, 5.0), (0.0, 20.0, 5.0)]
+        faces = [(0, 1, 2, 3), (4, 5, 6, 7)]
+        uvs = [((0.0, 0.0), (4.0, 0.0), (4.0, 20.0), (0.0, 20.0))] * 2
+        cols = [((31, 31, 31), (31, 31, 31), (11, 11, 11), (11, 11, 11))] * 2
+        v2, f2, u2, m2, o2, s2, c2 = cut_faces_at_height(
+            verts, faces, uvs, [1, 1], [0, 1], [(0,), (1,)], 8.0, {0}, colors=cols,
+        )
+        self.assertEqual(len(f2), 3)
+        self.assertEqual(o2, [0, 0, 1])
+        self.assertEqual(f2[2], (4, 5, 6, 7))
+        below, above = ([v2[i][1] for i in f] for f in f2[:2])
+        self.assertLessEqual(max(below), 8.0)
+        self.assertGreaterEqual(min(above), 8.0)
+        # UVs and colors follow the cut: v = y here, and the color is 3/5 of the way down.
+        for f, uv, col in zip(f2[:2], u2[:2], c2[:2]):
+            for i, (u, v), c in zip(f, uv, col):
+                self.assertAlmostEqual(v, v2[i][1])
+                if v2[i][1] == 8.0:
+                    self.assertEqual(c, (23, 23, 23))
+
+    def test_compact_chunks_keeps_layers_apart(self):
+        # Seabed and water over it in the same XZ cell land in different chunks.
+        verts = [(0.0, 0.0, 0.0), (40.0, 0.0, 0.0), (40.0, 0.0, 40.0), (0.0, 0.0, 40.0),
+                 (0.0, 8.0, 0.0), (40.0, 8.0, 0.0), (40.0, 8.0, 40.0), (0.0, 8.0, 40.0)]
+        faces = [(0, 1, 2, 3), (4, 5, 6, 7)]
+        uvs = [((0.0, 0.0),) * 4] * 2
+        args = (verts, faces, uvs, [0, 1], [0, 1], [(0,), (1,)], None, 128.0)
+        self.assertEqual(len(_compact_chunks(*args)[-1][0]), 1)
+        self.assertEqual(len(_compact_chunks(*args, layers=[0, 1])[-1][0]), 2)
+
+    def test_xz_near_polygon(self):
+        square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+        self.assertTrue(_xz_near_polygon(5.0, 5.0, square, 2.0))
+        self.assertTrue(_xz_near_polygon(11.5, 5.0, square, 2.0))
+        self.assertFalse(_xz_near_polygon(13.0, 5.0, square, 2.0))
+        self.assertTrue(_xz_near_polygon(5.0, 5.0, square[::-1], 0.0))
 
 
 if __name__ == "__main__":

@@ -1311,10 +1311,21 @@ int main(void) {
                 260u;
 #endif
             const uint16_t chunk_cap=(uint16_t)(2048u-overlay_reserve-extra_reserve);
+#ifdef CASTLE_WATER_LAYERS
+            /* Faces wholly on the far side of the water surface from the camera
+             * cannot be in front of the rest, so they draw first, then the water. */
+            const uint8_t camera_above=camera.eye.y>=CASTLE_WATER_Y;
+            const uint16_t layer_pass[3]={
+                camera_above?SM64DS_FAR_WATER_PASS:SM64DS_ACTOR_PASS,SM64DS_WATER_PASS,
+                camera_above?SM64DS_ACTOR_PASS:SM64DS_FAR_WATER_PASS};
+#endif
             for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c) {
                 chunk_qfirst[c]=scene.faces.count;
                 if (scene.faces.count<chunk_cap && !exp_chunk_far(c)) {
                     uint16_t v0=castle_chunk_vfirst[c];
+#ifdef CASTLE_WATER_LAYERS
+                    chunk_instances[c].pass=layer_pass[castle_chunk_layer[c]];
+#endif
                     SAT_PANIC_IF_ERROR(sat_scene_submit_instance(
                         &scene,&chunk_instances[c],SAT_SCENE3D_SLOT_INHERIT,&cp[v0],0));
                 }

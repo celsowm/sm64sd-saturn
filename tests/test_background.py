@@ -34,7 +34,10 @@ class BackgroundHostTests(unittest.TestCase):
     def test_camera_background_pass_precedes_actors(self):
         h=(ROOT/'runtime/sm64ds_background.h').read_text()
         self.assertIn('#define SM64DS_BACKGROUND_PASS 0u',h)
-        self.assertIn('#define SM64DS_ACTOR_PASS 1u',h)
+        # Ascending passes draw first: sky, the far side of a water surface, the water, actors.
+        self.assertIn('#define SM64DS_FAR_WATER_PASS 1u',h)
+        self.assertIn('#define SM64DS_WATER_PASS 2u',h)
+        self.assertIn('#define SM64DS_ACTOR_PASS 3u',h)
 
 
 @unittest.skipUnless(os.environ.get('SM64DS_ROM'),'local ROM absent')

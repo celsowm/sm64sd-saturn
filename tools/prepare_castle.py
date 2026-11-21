@@ -19,7 +19,8 @@ from sm64ds_pipeline.sdat import SdatArchive, resample_wave_s8
 from sm64ds_pipeline.skybox import emit_skybox
 from sm64ds_pipeline.sky_panorama import emit_sky_panorama
 from sm64ds_pipeline.textures import SourceTexture, bake_face, index_bakes, index_bakes_lut4, BakedTexture
-from sm64ds_pipeline.subdivide import cut_faces_against_boxes, split_large_faces, split_long_edges
+from sm64ds_pipeline.subdivide import (cut_faces_against_boxes, cut_faces_at_height, split_large_faces,
+                                       split_long_edges)
 from sm64ds_pipeline.sdk_split import split_nearby
 from sm64ds_pipeline.quad_merge import merge_coplanar_quads
 from sm64ds_pipeline.adaptive_bake import adaptive_bakes, adaptive_lut4_bakes
@@ -529,17 +530,33 @@ def _compact_rooms(vertices, faces, uvs, materials, origins, source_sets, face_r
     )
 
 
-def _compact_chunks(vertices, faces, uvs, materials, origins, source_sets, colors, cell_size):
-    """Partition world faces into non-empty XZ spatial grid chunks for 6-plane frustum culling."""
+def _xz_near_polygon(x, z, poly, tolerance):
+    """Whether (x, z) lies in the convex XZ polygon or within `tolerance` of its edges."""
+    sides = []
+    near = False
+    for (ax, az), (bx, bz) in zip(poly, poly[1:] + poly[:1]):
+        ex, ez = bx - ax, bz - az
+        sides.append(ex * (z - az) - ez * (x - ax))
+        length = ex * ex + ez * ez
+        t = 0.0 if length == 0 else max(0.0, min(1.0, ((x - ax) * ex + (z - az) * ez) / length))
+        near = near or math.hypot(ax + t * ex - x, az + t * ez - z) <= tolerance
+    return near or all(v >= 0 for v in sides) or all(v <= 0 for v in sides)
+
+
+def _compact_chunks(vertices, faces, uvs, materials, origins, source_sets, colors, cell_size, layers=None):
+    """Partition world faces into non-empty XZ spatial grid chunks for 6-plane frustum culling.
+
+    With `layers`, a chunk also holds faces of one layer only, so the runtime can
+    give each layer its own painter pass."""
     if cell_size <= 0:
         raise ValueError('chunk_size must be positive')
     cells = {}
     face_chunks = []
-    for f in faces:
+    for n, f in enumerate(faces):
         pts = [vertices[i] for i in (f[:3] if f[2] == f[3] else f)]
         cx = sum(p[0] for p in pts) / len(pts)
         cz = sum(p[2] for p in pts) / len(pts)
-        key = (math.floor(cx / cell_size), math.floor(cz / cell_size))
+        key = (math.floor(cx / cell_size), math.floor(cz / cell_size), layers[n] if layers else 0)
         cid = cells.get(key)
         if cid is None:
             cid = len(cells)
@@ -612,7 +629,8 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             adaptive_priorities=None, stitch_sources=(), stitch_cross_sources=(),
             pack_split_quads=False, vertex_colors=False, merge_quads=False, lut4=False,
             max_edge=0.0, max_edge_radius=0.0, max_tile_size=48, stage='main_castle',
-            chunk_size=0.0, warp_target='', with_intro_props=False, actors=None, spawn=None):
+            chunk_size=0.0, warp_target='', with_intro_props=False, actors=None, spawn=None,
+            water_layers=False):
     if stage not in ('main_castle', 'castle_1f', 'bombhei_map', 'main_garden', 'battan_king_map',
                      'kaizoku_irie'):
         raise ValueError(f'unsupported stage: {stage}')
@@ -667,6 +685,8 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
 
     if split_edge and sdk_split:
         raise ValueError('choose one subdivision strategy')
+    if water_layers and (is_interior or chunk_size <= 0):
+        raise ValueError('water layers need an exterior stage with --chunk-size')
     if refine_faces and not sdk_split:
         raise ValueError('face refinement requires SDK splitting')
     if pack_split_quads and not sdk_split:
@@ -734,6 +754,49 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
                 target_materials={3}, boxes=hedge_boxes, colors=colors,
             )
             face_rooms = [0] * len(faces)
+
+    def is_water(f, mat):
+        # Water: a translucent horizontal face.
+        return (((m.material_flags[mat] >> 16) & 31) < 31
+                and len({round(vertices[i][1], 3) for i in f}) == 1)
+
+    water_y = None
+    water_cut = 0
+    if water_layers and not is_interior:
+        # The main water surface is the height with the most water area. With the
+        # camera above it, no face wholly below it can be in front of one that
+        # reaches above it, so the runtime draws those first, then the water.
+        # A face that crosses it under the water (a rock, the shore) is cut there,
+        # or its submerged half would draw over the water. Elsewhere no water
+        # covers such a face, so it stays whole with the dry world.
+        areas = Counter()
+        for f, mat in zip(faces, materials):
+            if is_water(f, mat):
+                areas[round(vertices[f[0]][1], 3)] += _face_area(vertices, f)
+        if areas:
+            water_y = max(areas, key=areas.get)
+            surface = [[(vertices[i][0], vertices[i][2]) for i in (f[:3] if f[2] == f[3] else f)]
+                       for f, mat in zip(faces, materials)
+                       if is_water(f, mat) and abs(vertices[f[0]][1] - water_y) < 1e-3]
+            cut = set()
+            for n, f in enumerate(faces):
+                below = [vertices[i] for i in f if vertices[i][1] < water_y - 1e-3]
+                if below and any(vertices[i][1] > water_y + 1e-3 for i in f):
+                    x = sum(p[0] for p in below) / len(below)
+                    z = sum(p[2] for p in below) / len(below)
+                    if any(_xz_near_polygon(x, z, poly, 2.0) for poly in surface):
+                        cut.add(n)
+            room_of = dict(zip(origins, face_rooms))
+            vertices, faces, uvs, materials, origins, source_sets, colors = cut_faces_at_height(
+                vertices, faces, uvs, materials, origins, source_sets, water_y, cut, colors=colors,
+            )
+            face_rooms = [room_of[o] for o in origins]
+            water_cut = len(cut)
+
+    def water_layer(f, mat):
+        if is_water(f, mat) and abs(vertices[f[0]][1] - water_y) < 1e-3:
+            return 1
+        return 0 if max(vertices[i][1] for i in f) <= water_y + 1e-3 else 2
 
     split_center = (-64, 16) if is_interior else (0, 256)
     if sdk_split:
@@ -808,7 +871,8 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     elif not is_interior and chunk_size > 0:
         (vertices, faces, uvs, materials, origins, source_sets,
          face_chunks, colors, chunk_meta) = _compact_chunks(
-            vertices, faces, uvs, materials, origins, source_sets, colors, chunk_size
+            vertices, faces, uvs, materials, origins, source_sets, colors, chunk_size,
+            layers=[water_layer(f, mat) for f, mat in zip(faces, materials)] if water_y is not None else None,
         )
 
     def bake_castle(size):
@@ -1094,6 +1158,13 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             'const uint8_t castle_support_chunks[]={', array(support_chunks), '};',
             '',
         ]
+        if water_y is not None:
+            header += ['#define CASTLE_WATER_LAYERS 1', f'#define CASTLE_WATER_Y {fx(water_y)}',
+                       'extern const uint8_t castle_chunk_layer[CASTLE_CHUNK_COUNT];']
+            code += ['/* 0 below the water surface, 1 the water, 2 above it. */',
+                     'const uint8_t castle_chunk_layer[CASTLE_CHUNK_COUNT]={',
+                     array([water_layer(faces[f], materials[f]) for f in chunk_first]), '};', '']
+            props_report['castle_chunk_layers'] = Counter(water_layer(faces[f], materials[f]) for f in chunk_first)
         props_report['castle_chunk_count'] = len(chunk_first)
         props_report['castle_chunk_max_faces'] = max(chunk_count_arr) if chunk_count_arr else 0
         props_report['castle_chunk_size'] = chunk_size
@@ -1240,6 +1311,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
               'castle_tile_sizes': tile_size_hist,
               'split_edge': split_edge, 'sdk_split_grid': sdk_split, 'split_radius': split_radius,
               'max_edge': max_edge, 'max_edge_radius': max_edge_radius,
+              'water_layers_y': water_y, 'water_faces_cut': water_cut,
               'refine_faces': list(refine_faces), 'refine_grid': refine_grid,
               'refine_grid_overrides': refine_grids,
               'refine_axes_overrides': refine_axes, 'pack_split_quads': pack_split_quads,
@@ -1274,6 +1346,7 @@ if __name__ == '__main__':
     p.add_argument('--sdk-split-grid', type=float, default=0, help='Experimental LibSaturn XZ grid split size')
     p.add_argument('--split-radius', type=float, default=96, help='XZ radius around spawn for SDK split')
     p.add_argument('--max-edge', type=float, default=0, help='Subdivide oversized faces exceeding this edge length in world units')
+    p.add_argument('--water-layers', action='store_true', help='Chunk the level into below/water/above layers of the main water surface, drawn far side first (needs --chunk-size)')
     p.add_argument('--max-edge-radius', type=float, default=0, help='Optional XZ radius around spawn for --max-edge (0 = whole castle)')
     p.add_argument('--refine-face', type=int, action='append', default=[], help='Source face ID to split on the finer grid; repeatable')
     p.add_argument('--refine-manifest', type=Path, help='Validated source faces to refine')
@@ -1304,4 +1377,5 @@ if __name__ == '__main__':
             a.libsaturn_source, a.split_radius, a.adaptive_faces, a.texture_budget, a.texture_samples,
             a.refine_face, a.refine_grid, a.refine_manifest, a.adaptive_priorities, a.stitch_source, a.stitch_cross_source,
             a.pack_split_quads, a.vertex_colors, a.merge_quads, a.lut4, a.max_edge, a.max_edge_radius, a.max_tile_size,
-            a.stage, a.chunk_size, a.warp_target, a.with_intro_props, a.actors, a.spawn)
+            a.stage, a.chunk_size, a.warp_target, a.with_intro_props, a.actors, a.spawn,
+            a.water_layers)
