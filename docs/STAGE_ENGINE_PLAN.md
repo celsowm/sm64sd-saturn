@@ -692,3 +692,16 @@ when an enabled stage goes over.
 | | **`main_garden` (Castle Courtyard, `GARDEN.BIN`)** — phase-7 rollout stage 1. Enabled in `stage_table.py`; converts (1×1 fallback source for its one untextured material); boots in the probe (`tests/garden_walk.pad`: 1 jump, 2 landings, 0 resets, 0 skipped faces, Mario grounded). **41.3 ms/draw** (≤55 static budget). WRAM after link: **299 KB High / 645 KB Low free** (gate ≥32 KB). No course painting, so its 1F return warp is inert by design. |
 | | **`battan_king_map` (Whomp's Fortress, `WF.BIN`)** — phase-7 rollout stage 2. Enabled in `stage_table.py` with shared actors (COIN, RED_COIN, KURIBO, RED_BOMBHEI, HATENA_BLOCK). Converts (1,454 render faces, 30 chunks, 243,712 tex bytes). Boots in the probe (`tests/wf_walk.pad`: 1 jump, 2 landings, 0 resets, 0 skipped faces, Mario grounded). **46.0 ms/draw** (≤55 static budget, down from 65.5 after culling coin/star spin to 48 units). WRAM after link: **142 KB High / 417 KB Low free**. Next rollout stages: JRB, CCM, BBH, Bowser, per the plan's order. |
 | | **`kaizoku_irie` (Jolly Roger Bay, `JRB.BIN`)** — phase-7 rollout stage 3, static. Enabled in `stage_table.py` with shared actors (COIN, RED_COIN, KURIBO, RED_BOMBHEI, HATENA_BLOCK); its painting adds 1F entrance 5. Converts (4,820 render faces, 644 prisms, 61 coins). Boots in the probe (`tests/jrb_walk.pad`: spawn → beach → water's edge, 1 jump, 2 landings, 0 resets, 0 skipped faces, Mario grounded) and `tests/jrb_orbit.pad` orbits the bay from the spawn. **25.3 ms/draw walk / 41.5 ms/draw orbit** (≤55 static budget). WRAM after link: **64 KB High / 43 KB Low free**. Water and swimming are not implemented yet, so the routes stay on the beach and pier. |
+
+## Water plane (JRB)
+
+Translucent horizontal faces (polygon alpha < 31) are the water surface.
+`prepare_castle.py` removes them from the render mesh and emits
+`castle_water_regions[]`, one rectangle and height each (JRB: the bay at y=64,
+x -397..502, z -42..490, and the cave pool at y=-188.6). `src/castle.c` draws the
+region nearest the camera as a lib-saturn camera-centred water plane (4 rings,
+cell 56 units, same painter pass as the level so it depth-sorts with the
+terrain). Checked in Ymir with `tests/jrb_orbit.pad`: it boots, orbits and the
+bay shows water; WRAM free after link is 57.8 KB High (was ~64 KB). The look is
+flat colour with the plane's wobble and distance tint, not the DS water texture,
+and swimming/the underwater view are not wired in yet.

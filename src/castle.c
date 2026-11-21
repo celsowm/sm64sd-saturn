@@ -9,6 +9,7 @@
 #include <saturn/time.h>
 #include <saturn/cd_mount.h>
 #include <saturn/exec.h>
+#include <saturn/water_plane.h>
 #include <limits.h>
 #include "sm64ds_pose.h"
 #include "sm64ds_background.h"
@@ -354,6 +355,39 @@ static uint8_t g_stars;       /* stars collected this visit */
 static uint32_t g_star_bits;  /* bit per course star collected (save bit) */
 static uint8_t g_boss_defeated; /* boss hp hit 0 (star unlocked) */
 static sat_camera3d_t camera;
+
+#if defined(CASTLE_WATER_REGION_COUNT) && CASTLE_WATER_REGION_COUNT > 0
+/* The stage's water: the converter removed the translucent horizontal faces
+ * from the mesh and left one rectangle per height. A camera-centred lib-saturn
+ * plane (4 rings, cell 56 units, so the finest ring is 224 units across and the
+ * outer one reaches 896) draws the region nearest the camera. */
+static sat_water_plane_t water_plane;
+static const sat_scene3d_material_t water_material={
+    .kind=SAT_SCENE3D_RGB,.rgb555=SAT_RGB555(9,23,28),
+    .color_calc_slot=SAT_INDEXED_SOLID_OPAQUE,.sprite_flags=SAT_SPRITE_FLAG_MESH};
+
+static int32_t axis_gap(int32_t v,int32_t lo,int32_t hi) { return v<lo?lo-v:(v>hi?v-hi:0); }
+
+static void submit_water(sat_scene_t *scene,const sat_vec3_t *eye,uint32_t tick) {
+    uint32_t best=0u;
+    int64_t best_gap=-1;
+    for (uint32_t r=0;r<CASTLE_WATER_REGION_COUNT;++r) {
+        const castle_water_region_t *w=&castle_water_regions[r];
+        const int64_t dx=axis_gap(eye->x,w->min_x,w->max_x),dz=axis_gap(eye->z,w->min_z,w->max_z);
+        const int64_t gap=dx*dx+dz*dz;
+        if (best_gap<0 || gap<best_gap) {best_gap=gap;best=r;}
+    }
+    const castle_water_region_t *w=&castle_water_regions[best];
+    const sat_water_plane_config_t config={
+        .min_x=w->min_x,.max_x=w->max_x,.min_z=w->min_z,.max_z=w->max_z,
+        .surface=w->surface,.cell=56*ONE,.cells=4,.rings=4,
+        .underside=eye->y<w->surface,.wobble=ONE/2,.period=96*ONE,.speed=4,.tick=tick,
+        .near_color=sat_gouraud_rgb(0,2,3),.far_color=sat_gouraud_rgb(6,6,4),.glint=2};
+    SAT_PANIC_IF_ERROR(sat_water_plane_build(&water_plane,&config,eye->x,eye->z));
+    const sat_scene3d_material_t rings[4]={water_material,water_material,water_material,water_material};
+    SAT_PANIC_IF_ERROR(sat_water_plane_submit(scene,&water_plane,rings,SM64DS_ACTOR_PASS));
+}
+#endif
 static int yaw=0,camera_yaw=0,paused=0,facing=180,close_camera=0;
 static uint8_t camera_choice=0;
 static const int16_t camera_offsets[]={0,45,-45,90,-90,135,-135,180};
@@ -1344,6 +1378,9 @@ int main(void) {
                 .rgb555=SAT_RGB555(31,0,31),.color_calc_slot=SAT_INDEXED_SOLID_OPAQUE};
             SAT_PANIC_IF_ERROR(sat_scene_submit_quad(&scene,&wall,&wall_material,SM64DS_ACTOR_PASS));
         }
+#endif
+#if defined(CASTLE_WATER_REGION_COUNT) && CASTLE_WATER_REGION_COUNT > 0
+        if (!SM64DS_VISUAL_DIAGNOSTICS) submit_water(&scene,&camera.eye,player.ticks);
 #endif
         g_sm64ds_castle_stats.castle_clip_candidates=scene.faces.clipped_faces-previous_clipped;
         previous_clipped=scene.faces.clipped_faces;
