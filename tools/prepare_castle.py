@@ -735,36 +735,6 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             )
             face_rooms = [0] * len(faces)
 
-    # Water: translucent horizontal faces (polygon alpha < 31) are the water
-    # surface. They leave the mesh, which keeps the level's painter order simple,
-    # and become one rectangle per height that the runtime draws as a lib-saturn
-    # water plane. The rectangle is the bounding box of the removed faces.
-    water_boxes = {}
-    if not is_interior:
-        keep = []
-        for i, (f, mat) in enumerate(zip(faces, materials)):
-            ys = {round(vertices[vi][1], 3) for vi in f}
-            if ((m.material_flags[mat] >> 16) & 31) < 31 and len(ys) == 1:
-                y = next(iter(ys))
-                box = water_boxes.setdefault(y, [1e9, -1e9, 1e9, -1e9])
-                for vi in f:
-                    box[0] = min(box[0], vertices[vi][0])
-                    box[1] = max(box[1], vertices[vi][0])
-                    box[2] = min(box[2], vertices[vi][2])
-                    box[3] = max(box[3], vertices[vi][2])
-            else:
-                keep.append(i)
-        if water_boxes:
-            faces = [faces[i] for i in keep]
-            uvs = [uvs[i] for i in keep]
-            materials = [materials[i] for i in keep]
-            origins = [origins[i] for i in keep]
-            source_sets = [source_sets[i] for i in keep]
-            face_rooms = [face_rooms[i] for i in keep]
-            if colors is not None:
-                colors = [colors[i] for i in keep]
-    water_regions = [(y, *box) for y, box in sorted(water_boxes.items())]
-
     split_center = (-64, 16) if is_interior else (0, 256)
     if sdk_split:
         if sdk_path is None:
@@ -956,10 +926,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
                'extern const uint16_t castle_support_faces[];',
                'extern const sat_vec3_t castle_support_normals[];',
                'extern const uint8_t castle_double_sided[CASTLE_FACE_COUNT];',
-               'extern const uint8_t castle_polygon_alpha[CASTLE_FACE_COUNT];',
-               f'#define CASTLE_WATER_REGION_COUNT {len(water_regions)}u',
-               'typedef struct { int32_t surface, min_x, max_x, min_z, max_z; } castle_water_region_t;',
-               'extern const castle_water_region_t castle_water_regions[];']
+               'extern const uint8_t castle_polygon_alpha[CASTLE_FACE_COUNT];']
     code = ['#include "castle_scene.h"', '/* Private ROM-derived data. Never commit. */',
             'static const sat_vec3_t vertices[]={', ',\n'.join(vec(v) for v in vertices), '};',
             'static const uint16_t faces[]={', array([i for face in faces for i in face]), '};',
@@ -971,9 +938,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             'const uint8_t castle_double_sided[]={',
             array([int((m.material_flags[mat] & 0xc0) == 0xc0) for mat in materials]), '};',
             'const uint8_t castle_polygon_alpha[]={',
-            array([(m.material_flags[mat] >> 16) & 31 for mat in materials]), '};',
-            'const castle_water_region_t castle_water_regions[]={',
-            ',\n'.join('{' + ','.join(str(fx(v)) for v in r) + '}' for r in water_regions) or '{0,0,0,0,0}', '};']
+            array([(m.material_flags[mat] >> 16) & 31 for mat in materials]), '};']
     for i, t in enumerate(textures):
         code.extend([f'static const uint8_t pixels_{i}[]={{', array(t.pixels), '};'])
     code += ['static const sat_model_texture_asset_t textures[]={']
