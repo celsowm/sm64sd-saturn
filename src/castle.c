@@ -63,6 +63,10 @@
 #include <saturn/vdp2_layers.h>
 #include "sky_panorama.h"
 #endif
+#ifdef CASTLE_WATER_LAYERS
+#include <saturn/vdp2_color_offset.h>
+#include <saturn/vdp2_layers.h>
+#endif
 #if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
 #include <saturn/asset.h>
 #include <saturn/audio.h>
@@ -531,6 +535,34 @@ static void update_camera_alive(void) {
     g_sm64ds_castle_stats.camera_clearance=clearance[camera_choice];
     SAT_PANIC_IF_ERROR(sat_camera3d_update(&camera));
 }
+#ifdef CASTLE_WATER_LAYERS
+/* A camera under the water surface fades a VDP2 colour offset toward a blue
+ * tint over a few frames and back out. The surface comes from the collision's
+ * water floors, so a dry cave below the water level is not tinted. Bank B and
+ * the sprite/back layers are used so the intro's bank-A fade is untouched. */
+#define WATER_TINT_FRAMES 8
+static uint8_t water_tint_fade=0;
+static void update_water_tint(void) {
+    static const sat_vdp2_color_offset_t tint={-90,-40,-5};
+    int32_t surface;
+    const uint8_t under=sm64ds_water_surface(&castle_collision,camera.eye.x,camera.eye.z,
+                                             camera.eye.y,&surface)!=0;
+    const uint8_t before=water_tint_fade;
+    if (under && water_tint_fade<WATER_TINT_FRAMES) ++water_tint_fade;
+    else if (!under && water_tint_fade>0) --water_tint_fade;
+    if (water_tint_fade) {
+        const sat_vdp2_color_offset_t off={(int16_t)(tint.r*water_tint_fade/WATER_TINT_FRAMES),
+            (int16_t)(tint.g*water_tint_fade/WATER_TINT_FRAMES),
+            (int16_t)(tint.b*water_tint_fade/WATER_TINT_FRAMES)};
+        (void)sat_vdp2_color_offset_set(SAT_VDP2_COLOR_OFFSET_B,&off);
+        (void)sat_vdp2_color_offset_enable(SAT_VDP2_LAYER_SPRITE|SAT_VDP2_LAYER_BACK,
+                                           SAT_VDP2_COLOR_OFFSET_B);
+    } else if (before) {
+        (void)sat_vdp2_color_offset_disable(SAT_VDP2_LAYER_SPRITE|SAT_VDP2_LAYER_BACK);
+    }
+    if (water_tint_fade||before) (void)sat_vdp2_layers_commit();
+}
+#endif
 static void simulation(const sat_pad_state_t *pad,uint8_t jump) {
     if(pad->held&SAT_PAD_L)yaw=(yaw+358)%360;
     if(pad->held&SAT_PAD_R)yaw=(yaw+2)%360;
@@ -1274,6 +1306,9 @@ int main(void) {
         if (!intro_cutscene_active)
 #endif
         update_camera();
+#ifdef CASTLE_WATER_LAYERS
+        update_water_tint();
+#endif
 #ifdef CASTLE_ROOM_CULLING
         update_visible_rooms();
 #endif
