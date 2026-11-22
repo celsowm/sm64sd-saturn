@@ -28,7 +28,7 @@ ROUTES = {  # name: (pad, fields, check scenario[, target])
     'c1f_walk': ('castle_1f_walk.pad', 320, 'boot', 'sm64ds_castle_1f'),
     # Bob-omb Battlefield: the summit route stomps King Bob-omb three times and
     # collects star 1 (star_bits becomes 1).
-    'bob_summit': ('bob_boss_fight.pad', 6000, 'boot', 'sm64ds_bob_boss'),
+    'bob_summit': ('bob_boss_fight.pad', 510, 'summit', 'sm64ds_bob_boss'),
     'wf_walk': ('wf_walk.pad', 260, 'boot', 'sm64ds_wf'),
 }
 STATE = ('x', 'y', 'z', 'jumps', 'landings', 'wall_hits', 'resets', 'grounded',

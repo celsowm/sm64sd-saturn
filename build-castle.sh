@@ -22,10 +22,12 @@ python3 tools/prepare_castle.py --rom "$rom" --out private/bob \
   --max-edge 48 --chunk-size 128 --max-tile-size 48 --texture-samples 4 \
   --texture-budget 245760
 # Castle Courtyard: first phase-7 rollout stage. Smaller and simpler than BoB.
+# The courtyard has a shallow pond (water surface y=3.2) drawn as a lib-saturn
+# water plane; --water-layers enables the surface, underwater tint and passes.
 python3 tools/prepare_castle.py --rom "$rom" --out private/garden \
   --stage main_garden --merge-quads --vertex-colors --lut4 \
   --max-edge 48 --chunk-size 128 --max-tile-size 48 --texture-samples 4 \
-  --texture-budget 245760
+  --texture-budget 245760 --water-layers
 # Whomp's Fortress: phase-7 rollout stage 2.
 python3 tools/prepare_castle.py --rom "$rom" --out private/wf \
   --stage battan_king_map --merge-quads --vertex-colors --lut4 \
@@ -37,13 +39,13 @@ python3 tools/prepare_castle.py --rom "$rom" --out private/jrb \
   --max-edge 112 --chunk-size 128 --max-tile-size 32 --texture-samples 2 \
   --texture-budget 196608 --water-layers
 # Boss-rush variant: same course and actor kinds, Mario starts on the summit
-# arena floor (not the main entrance), so the King Bob-omb fight is one short
-# walk. The spawn override gives the arena floor Y at the boss's XZ (the KCL
-# height at (96, -345) is ~268; the +512 drop-in puts Mario just above it).
+# arena floor at its east end, facing the King Bob-omb at (96, -345) so the
+# fight is a short walk toward him (not a drop-in on his head). The arena floor
+# is ~268 at the boss; spawning at (150, -345) keeps a clear 54-unit gap.
 python3 tools/prepare_castle.py --rom "$rom" --out private/bob_boss \
   --stage bombhei_map --merge-quads --vertex-colors --lut4 \
   --max-edge 48 --chunk-size 128 --max-tile-size 48 --texture-samples 4 \
-  --texture-budget 245760 --spawn 96 -345 268
+  --texture-budget 245760 --spawn 150 -345 268 --spawn-yaw 90
 cmake -S . -B build/castle -G Ninja \
   "-DCMAKE_TOOLCHAIN_FILE=$source/cmake/toolchains/sh2eb-elf.cmake" \
   "-DLIBSATURN_TOOLCHAIN_ROOT=$compiler" "-DCMAKE_PREFIX_PATH=$sdk" \

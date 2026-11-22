@@ -28,6 +28,13 @@ static int cell(const sm64ds_collision_t *w,int32_t x,int32_t z) {
  * remain freely walkable. */
 #define SLIPPERY_NORMAL_Y 61600
 #define STEEP_NORMAL_Y 42598
+/* Terrace climbing. CLIMB_MAX is the tallest lip and CLIMB_SPEED is the rise
+ * per simulation step. */
+#define CLIMB_MAX (88*ONE)
+#define CLIMB_SPEED (4*ONE)
+#define CLIMB_REACH (1*ONE)          /* wall probe distance past the body */
+#define CLIMB_COOLDOWN 30
+#define CLIMB_TIMEOUT 90
 /* Water: a CLPS with the water bit (word0 & 0x20) is the water surface, never
  * solid ground; under it the player swims (the DS St_Swim_Init/Main).
  * Distances are DS units at the KCL scale (0.064). Speeds keep the walk/run
@@ -161,6 +168,7 @@ static void swim_leave(sm64ds_player_t *p) {
 void sm64ds_player_reset(sm64ds_player_t *p) {
     p->feet=p->spawn;p->velocity_y=0;p->knock_x=p->knock_z=0;p->grounded=0;p->moving=0;p->running=0;
     swim_leave(p);
+    p->climbing=0;p->climb_cooldown=0;p->climb_top=(sat_vec3_t){0,0,0};p->climb_steps=0;
     if(!p->max_health)p->max_health=SM64DS_PLAYER_MAX_HEALTH;
     p->health=p->max_health;p->invuln=0;p->dead=0;p->death_timer=0;
     p->held_yaw=0;
@@ -173,6 +181,7 @@ void sm64ds_player_hurt(sm64ds_player_t *p,uint8_t damage,
     if(damage>=p->health)p->health=0;
     else p->health=(uint8_t)(p->health-damage);
     p->knock_x=push_x;p->knock_z=push_z;
+    if(p->climbing) {p->climbing=0;p->climb_cooldown=CLIMB_COOLDOWN;}
     if(p->swimming) p->swim_speed=0;   /* a hit stops the stroke, not the swim */
     else {p->velocity_y=3*ONE;p->grounded=0;}
     if(!p->health) {
@@ -350,6 +359,76 @@ static void swim_step(sm64ds_player_t *p,const sm64ds_collision_t *w,uint8_t jum
         }
     }
 }
+/* Find the wall still touching the capsule after the movement substeps. */
+static const sm64ds_prism_t *climb_contact(const sm64ds_collision_t *w,
+                                          const sat_vec3_t *feet,sat_vec3_t input) {
+    const int bin=cell(w,feet->x,feet->z);
+    if(bin<0) return 0;
+    const sm64ds_prism_t *wall=0;
+    int32_t best=0;
+    for(uint32_t k=w->offsets[bin];k<w->offsets[bin+1];++k) {
+        const sm64ds_prism_t *t=&w->prisms[w->indices[k]];
+        if(t->normal.y< -ONE/2 || t->normal.y>=ONE/2 ||
+           t->max.y<=feet->y+STEP || t->min.y>feet->y+HEIGHT || is_water_floor(w,t)) continue;
+        const int32_t into=dot(input,t->normal);
+        if(into>=best) continue;
+        for(int s=0;s<2;++s) {
+            const sat_vec3_t center={feet->x,feet->y+(s?HEIGHT-RADIUS:RADIUS),feet->z};
+            const int32_t distance=dot(sub(center,t->origin),t->normal);
+            /* Wall response adds 1/64 unit of separation. */
+            if(distance< -RADIUS || distance>RADIUS+ONE/8) continue;
+            const sat_vec3_t point={center.x-mul(distance,t->normal.x),
+                                    center.y-mul(distance,t->normal.y),
+                                    center.z-mul(distance,t->normal.z)};
+            if(inside(t,point,RADIUS/2)) {
+                wall=t;
+                best=into;
+                break;
+            }
+        }
+    }
+    return wall;
+}
+
+static void climb_start(sm64ds_player_t *p,const sm64ds_collision_t *w,sat_vec3_t input) {
+    const sm64ds_prism_t *wall=climb_contact(w,&p->feet,input);
+    if(!wall) return;
+    const int32_t reach=RADIUS+CLIMB_REACH;
+    const int32_t x=p->feet.x-mul(reach,wall->normal.x);
+    const int32_t z=p->feet.z-mul(reach,wall->normal.z);
+    int32_t top;
+    uint8_t slippery;
+    if(!floor_query(w,x,z,p->feet.y+CLIMB_MAX,&top,0,&slippery,0,1) ||
+       slippery || top<=p->feet.y+STEP || top<wall->max.y-STEP) return;
+    p->climb_top=(sat_vec3_t){x,top,z};
+    p->climbing=1;
+    p->climb_steps=0;
+    p->velocity_y=0;
+    p->grounded=0;
+    ++p->climb_count;
+}
+
+static void climb_step(sm64ds_player_t *p,const sm64ds_collision_t *w,uint8_t jump) {
+    if(jump || ++p->climb_steps>CLIMB_TIMEOUT) {
+        p->climbing=0;
+        p->climb_cooldown=CLIMB_COOLDOWN;
+        if(jump) {
+            p->velocity_y=3*ONE;
+            ++p->jumps;
+        }
+        return;
+    }
+    p->feet.y+=CLIMB_SPEED;
+    push_walls(p,w);
+    if(p->feet.y>=p->climb_top.y) {
+        p->feet=p->climb_top;
+        push_walls(p,w);
+        p->grounded=1;
+        p->climbing=0;
+        p->climb_cooldown=CLIMB_COOLDOWN;
+    }
+}
+
 void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
                         int32_t dx,int32_t dz,uint8_t jump,uint8_t run) {
     if(p->invuln)--p->invuln;
@@ -364,11 +443,14 @@ void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
         if(p->feet.y< -160*ONE)sm64ds_player_reset(p);
         return;
     }
+    const sat_vec3_t movement={dx,0,dz};
     if(p->knock_x||p->knock_z) {
         dx+=p->knock_x;dz+=p->knock_z;
         p->knock_x-=p->knock_x/8;p->knock_z-=p->knock_z/8;
     }
     p->moving=dx!=0||dz!=0;p->running=p->moving&&run;
+    if(p->climb_cooldown)--p->climb_cooldown;
+    if(p->climbing) { climb_step(p,w,jump); return; }
     if(p->grounded) {
         int32_t cur_floor=0;sat_vec3_t cur_normal={0,ONE,0};uint8_t cur_slip=0;
         if(floor_query(w,p->feet.x,p->feet.z,p->feet.y+STEP,&cur_floor,&cur_normal,&cur_slip,0,1) &&
@@ -393,6 +475,7 @@ void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
     int32_t old_y=p->feet.y;
     p->velocity_y-=ONE/8;
     if(p->velocity_y< -6*ONE)p->velocity_y=-6*ONE;
+    const uint32_t wall_hits_before=p->wall_hits;
     /* Substeps keep every movement shorter than the collision radius. */
     for(int step=0;step<4;++step) {
         p->feet.x+=dx/4;p->feet.z+=dz/4;p->feet.y+=p->velocity_y/4;
@@ -417,6 +500,10 @@ void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
         int32_t surface=0;
         if(sm64ds_water_surface(w,p->feet.x,p->feet.z,p->feet.y,&surface)&&
            p->feet.y<surface-SWIM_FLOAT) swim_enter(p,surface);
+        else if(w->climb_enabled && p->grounded && !p->climb_cooldown &&
+                p->wall_hits!=wall_hits_before && (movement.x||movement.z)) {
+            climb_start(p,w,movement);
+        }
     }
     if(p->feet.y< -160*ONE)sm64ds_player_reset(p);
 }

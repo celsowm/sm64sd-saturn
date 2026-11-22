@@ -1,0 +1,6 @@
+# Reproduces the blocked approach from the Castle 1F lobby to the first
+# painting room. Use the unified disc and inject the Castle 1F application.
+0 NONE
+20 UP+LEFT+B
+180 RIGHT+UP+B
+500 NONE

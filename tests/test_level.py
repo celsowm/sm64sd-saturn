@@ -74,7 +74,8 @@ class ActorBakeTests(unittest.TestCase):
         from sm64ds_pipeline.actor_model import bake_actor
         from sm64ds_pipeline.level import actor_placements
         fs = Filesystem.from_file(Path(os.environ['SM64DS_ROM']))
-        placed = actor_placements(fs, 'bombhei_map', ACTORS)
+        wanted = {name: (spec.source or name, spec.only_star) for name, spec in ACTORS.items()}
+        placed = actor_placements(fs, 'bombhei_map', wanted)
         self.assertEqual(len(placed['BOMBHEI']), 11)
         self.assertEqual(len(placed['BOMBKING']), 1)
         spec = ACTORS['BOMBHEI']

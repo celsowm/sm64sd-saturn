@@ -209,7 +209,7 @@ def _painting_box(p, fx):
 EMPTY_BOX = (1, 1, 1, 0, 0, 0)   # min > max: never triggers (hotkey-only target)
 
 
-def _stage_warps(stage, stage_entrance, warp_target, c1f_objs, fx):
+def _stage_warps(stage, stage_entrance, warp_target, c1f_objs, fx, spawn_yaw=None):
     """(entrances, warps): spawn points by id and trigger boxes to other stages.
 
     Entrance ids: 0 default, 1 return from the other castle stage, 2 intro
@@ -234,6 +234,8 @@ def _stage_warps(stage, stage_entrance, warp_target, c1f_objs, fx):
         return [spawn, ret, spawn], [((fx(-16.0), fx(44.0), fx(-74.0), fx(16.0), fx(66.0), fx(-58.0)),
                                       warp_target or 'C1F.BIN', 0, 0)]
     ex, ey, ez, eyaw = stage_entrance
+    if spawn_yaw is not None:
+        eyaw = spawn_yaw % 360
     # Boss-rush spawn: stand on the summit arena floor just below the boss's
     # authored position, so he is reachable without a climb. The arena floor
     # is the KCL height at the boss's XZ, which the model bounds cannot give.
@@ -469,6 +471,25 @@ def _face_area(vertices, face):
     return area
 
 
+def _kcl_water_surface(prisms, water_mask):
+    """Return the dominant horizontal CLPS water surface and its triangles."""
+    areas = Counter()
+    triangles = {}
+    for prism in prisms:
+        if prism.attribute >= 32 or not (water_mask >> prism.attribute) & 1:
+            continue
+        vertices = prism.vertices
+        y = round(vertices[0][1], 3)
+        if prism.normal[1] < 0.5 or any(abs(v[1] - y) >= 1e-3 for v in vertices):
+            continue
+        areas[y] += _face_area(vertices, (0, 1, 2, 2))
+        triangles.setdefault(y, []).append(vertices)
+    if not areas:
+        return None, ()
+    y = max(areas, key=areas.get)
+    return y, triangles[y]
+
+
 def _compact_rooms(vertices, faces, uvs, materials, origins, source_sets, face_rooms, colors, room_count):
     """Order faces and vertices into contiguous per-room slices for fast O(1) room culling."""
     order = sorted(range(len(faces)), key=lambda i: (face_rooms[i], i))
@@ -630,7 +651,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             pack_split_quads=False, vertex_colors=False, merge_quads=False, lut4=False,
             max_edge=0.0, max_edge_radius=0.0, max_tile_size=48, stage='main_castle',
             chunk_size=0.0, warp_target='', with_intro_props=False, actors=None, spawn=None,
-            water_layers=False):
+            water_layers=False, spawn_yaw=None):
     if stage not in ('main_castle', 'castle_1f', 'bombhei_map', 'main_garden', 'battan_king_map',
                      'kaizoku_irie'):
         raise ValueError(f'unsupported stage: {stage}')
@@ -760,8 +781,13 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         return (((m.material_flags[mat] >> 16) & 31) < 31
                 and len({round(vertices[i][1], 3) for i in f}) == 1)
 
+    slippery_mask, water_mask = extract_clps_masks(
+        fs, CASTLE_1F_OVERLAY_ID if is_interior else
+        CASTLE_GROUNDS_OVERLAY_ID if stage_entrance is None else stage_overlay(fs, stage)
+    )
     water_y = None
     water_cut = 0
+    water_plane_bounds = None
     if water_layers and not is_interior:
         # The main water surface is the height with the most water area. With the
         # camera above it, no face wholly below it can be in front of one that
@@ -769,15 +795,28 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         # A face that crosses it under the water (a rock, the shore) is cut there,
         # or its submerged half would draw over the water. Elsewhere no water
         # covers such a face, so it stays whole with the dry world.
+        #
+        # The authoritative water height is the KCL water surface (the CLPS
+        # water bit): that is what the swim logic uses. The model's water-material
+        # faces can sit at a different height (the garden's visual stream is at
+        # y=0 while the swim pond is at y=3.2), so prefer the KCL when it has
+        # water. Fall back to the model's water faces for stages whose water is
+        # only in the model.
         areas = Counter()
         for f, mat in zip(faces, materials):
             if is_water(f, mat):
                 areas[round(vertices[f[0]][1], 3)] += _face_area(vertices, f)
-        if areas:
+        water_y, water_triangles = _kcl_water_surface(prisms, water_mask)
+        if water_y is None and areas:
             water_y = max(areas, key=areas.get)
+        if water_y is not None:
             surface = [[(vertices[i][0], vertices[i][2]) for i in (f[:3] if f[2] == f[3] else f)]
                        for f, mat in zip(faces, materials)
                        if is_water(f, mat) and abs(vertices[f[0]][1] - water_y) < 1e-3]
+            if not surface and water_triangles:
+                surface = [[(v[0], v[2]) for v in t] for t in water_triangles]
+                xs, zs = zip(*(v for t in surface for v in t))
+                water_plane_bounds = (min(xs), max(xs), min(zs), max(zs))
             cut = set()
             for n, f in enumerate(faces):
                 below = [vertices[i] for i in f if vertices[i][1] < water_y - 1e-3]
@@ -1049,15 +1088,12 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     for b in bins:
         indices.extend(b)
         offsets.append(len(indices))
-    slippery_mask, water_mask = extract_clps_masks(
-        fs, CASTLE_1F_OVERLAY_ID if is_interior else
-        CASTLE_GROUNDS_OVERLAY_ID if stage_entrance is None else stage_overlay(fs, stage)
-    )
     code += ['static const uint32_t offsets[]={', array(offsets), '};',
              'static const uint16_t collision_indices[]={', array(indices), '};',
              'const sm64ds_collision_t castle_collision={.prisms=prisms,.offsets=offsets,.indices=collision_indices,',
              f'.count={len(prisms)},.nx={nx},.nz={nz},.origin_x={fx(ox)},.origin_z={fx(oz)},'
-             f'.slippery_attrs=0x{slippery_mask:08x}u,.water_attrs=0x{water_mask:08x}u' + '};', '']
+             f'.slippery_attrs=0x{slippery_mask:08x}u,.water_attrs=0x{water_mask:08x}u,'
+             f'.climb_enabled={int(BY_NAME[stage].climb_enabled)}}};', '']
     props_report = {}
     c1f_objs = None
     if lut4:
@@ -1161,6 +1197,10 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         if water_y is not None:
             header += ['#define CASTLE_WATER_LAYERS 1', f'#define CASTLE_WATER_Y {fx(water_y)}',
                        'extern const uint8_t castle_chunk_layer[CASTLE_CHUNK_COUNT];']
+            if water_plane_bounds:
+                header += ['#define CASTLE_WATER_PLANE 1']
+                for axis, bound in zip(('X0', 'X1', 'Z0', 'Z1'), water_plane_bounds):
+                    header += [f'#define CASTLE_WATER_REGION_{axis} {fx(bound)}']
             code += ['/* 0 below the water surface, 1 the water, 2 above it. */',
                      'const uint8_t castle_chunk_layer[CASTLE_CHUNK_COUNT]={',
                      array([water_layer(faces[f], materials[f]) for f in chunk_first]), '};', '']
@@ -1197,7 +1237,7 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
         code += ['sm64ds_actor_kind_t *const castle_actor_kinds[]={'] + [
             f'  &actor_kind_{k.lower()},' for k in kinds] + ['};', '']
         props_report['actor_kinds'] = actor_report
-    entrances, warps = _stage_warps(stage, stage_entrance, warp_target, c1f_objs, fx)
+    entrances, warps = _stage_warps(stage, stage_entrance, warp_target, c1f_objs, fx, spawn_yaw)
     desc = {'castle_1f': ('C1F', 1, (3, 4, 7), 52, 32)}.get(stage) or (
         ('EXT', 0, (12, 20, 30), 65, 35) if stage_entrance is None else (stage_bin, 2, (12, 20, 30), 65, 35))
     kill_y = fx(min(v[1] for v in vertices) - 64.0)   # nothing below the lowest vertex to land on
@@ -1377,6 +1417,8 @@ if __name__ == '__main__':
     p.add_argument('--chunk-size', type=float, default=0, help='Partition exterior world into XZ spatial chunks of this size for frustum culling')
     p.add_argument('--spawn', nargs=3, type=float, default=None, metavar=('X', 'Z', 'Y'),
                    help='Override the course spawn in Saturn units (X, Z, floor Y)')
+    p.add_argument('--spawn-yaw', type=int, default=None,
+                   help='Override the course spawn/camera yaw (degrees)')
     p.add_argument('--actors', nargs='*', default=None, help='Override the stage table actor kinds')
     p.add_argument('--warp-target', default='', help='Override target binary name for stage warp (e.g. EXT.BIN)')
     p.add_argument('--with-intro-props', action='store_true', help='Also emit Lakitu, green warp pipe, and opening SFX for Act III cutscene')
@@ -1386,4 +1428,4 @@ if __name__ == '__main__':
             a.refine_face, a.refine_grid, a.refine_manifest, a.adaptive_priorities, a.stitch_source, a.stitch_cross_source,
             a.pack_split_quads, a.vertex_colors, a.merge_quads, a.lut4, a.max_edge, a.max_edge_radius, a.max_tile_size,
             a.stage, a.chunk_size, a.warp_target, a.with_intro_props, a.actors, a.spawn,
-            a.water_layers)
+            a.water_layers, a.spawn_yaw)

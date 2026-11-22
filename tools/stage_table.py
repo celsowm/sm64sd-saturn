@@ -18,6 +18,7 @@ class Stage:
     painting: str = ''        # castle_1f painting model for this course (data/picture/<x>.bmd)
     far_cull: int = 0         # world units: skip terrain chunks farther than this (0: off)
     actors: tuple = ()        # DS actor names baked as static kinds (actor_registry.ACTORS)
+    climb_enabled: bool = False
 
 
 def _s(name, bin, title, profile='outdoor', **kw):
@@ -31,6 +32,7 @@ STAGES = [
     _s('castle_b1', 'CASTLEB1', 'Castle Basement', 'indoor'),
     _s('castle_2f', 'CASTLE2F', 'Castle 2F/3F', 'indoor'),
     _s('bombhei_map', 'BOB', 'Bob-omb Battlefield', enabled=True, painting='for_bh', far_cull=320,
+       climb_enabled=True,
        actors=('BOMBHEI', 'RED_BOMBHEI', 'KURIBO', 'BOMBKING', 'STAR1', 'HATENA_BLOCK',
                'COIN', 'RED_COIN', 'SECRET_COIN', 'WANWAN', 'IRONBALL')),
     _s('battan_king_map', 'WF', "Whomp's Fortress", enabled=True, painting='for_bk',

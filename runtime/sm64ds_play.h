@@ -19,6 +19,7 @@ typedef struct {
     /* Bitmask of CLPS attribute indices (<32) whose word0 carries the water
      * bit (0x20): those floors are the water surface, not solid ground. */
     uint32_t water_attrs;
+    uint8_t climb_enabled;
 } sm64ds_collision_t;
 
 #define SM64DS_PLAYER_MAX_HEALTH 8
@@ -29,6 +30,11 @@ typedef struct {
     uint32_t ticks, jumps, landings, wall_hits, resets;
     uint8_t grounded, moving, running;
     uint8_t swimming;         /* 1 while in the swim state (St_Swim) */
+    uint8_t climbing;        /* 1 while mantling a terrace wall */
+    uint8_t climb_cooldown;  /* steps before another climb can start */
+    sat_vec3_t climb_top;    /* world position of the ledge to mantle onto */
+    uint16_t climb_steps;    /* steps spent in the current climb (timeout) */
+    uint32_t climb_count;    /* total climbs started (telemetry) */
     int32_t knock_x, knock_z; /* per-step push from hits; decays */
     uint8_t health, max_health;
     uint8_t invuln;           /* hurt i-frames left, in 60 Hz steps */

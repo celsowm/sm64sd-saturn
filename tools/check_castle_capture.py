@@ -6,24 +6,28 @@ from pathlib import Path
 import struct
 import subprocess
 
-FIELDS='magic frames ticks jumps landings wall_hits resets x y z velocity_y camera_x camera_y camera_z target_x target_y target_z grounded clip commands skipped faces paused culled clipped fallback sky_clip_candidates castle_clip_candidates body_clip_candidates head_clip_candidates texture_arena_initial texture_arena_remaining texture_estimate health max_health dead coins star_bits boss_hp boss_state boss_held boss_x boss_y boss_z requested_yaw actual_camera_yaw camera_clearance mario_facing camera_fov_y'.split()
+FIELDS='magic frames ticks jumps landings wall_hits resets x y z velocity_y camera_x camera_y camera_z target_x target_y target_z grounded clip commands skipped faces paused culled clipped fallback sky_clip_candidates castle_clip_candidates body_clip_candidates head_clip_candidates texture_arena_initial texture_arena_remaining texture_estimate health max_health dead coins star_bits boss_hp boss_state boss_held boss_x boss_y boss_z requested_yaw actual_camera_yaw camera_clearance mario_facing camera_fov_y climbing climb_count water_plane_faces'.split()
 
 
 def check(elf, wram, nm, scenario):
     symbols={}
-    for line in subprocess.check_output([str(nm),'-n',str(elf)],text=True).splitlines():
+    sizes={}
+    for line in subprocess.check_output([str(nm),'-n','-S',str(elf)],text=True).splitlines():
         words=line.split()
-        if len(words)==3:
-            symbols[words[2].lstrip('_')]=int(words[0],16)
+        if len(words) in (3,4):
+            name=words[-1].lstrip('_')
+            symbols[name]=int(words[0],16)
+            if len(words)==4:
+                sizes[name]=int(words[1],16)
     data=wram.read_bytes()
     if len(data)!=1024*1024: raise ValueError('expected a complete High WRAM dump')
     offset=symbols['g_sm64ds_castle_stats']-0x06000000
-    # The header must have been extended in lockstep with the C struct; a
-    # stale field list silently shifts every later value.
     assert len(FIELDS)==len(set(FIELDS)), 'duplicate telemetry field'
-    assert len(FIELDS)==49, "telemetry field count is %d, expected 49" % len(FIELDS)
     # SH-2 is big-endian and the struct is uint32_t/int32_t only.
-    report=dict(zip(FIELDS,struct.unpack_from(f'>{len(FIELDS)}I',data,offset)))
+    layout=struct.Struct(f'>{len(FIELDS)}I')
+    if sizes['g_sm64ds_castle_stats']!=layout.size:
+        raise ValueError('telemetry field list and ELF symbol size disagree')
+    report=dict(zip(FIELDS,layout.unpack_from(data,offset)))
     for name in ('x','y','z','velocity_y','camera_x','camera_y','camera_z',
                  'target_x','target_y','target_z','mario_facing','camera_fov_y',
                  'camera_clearance','boss_x','boss_y','boss_z'):
@@ -42,6 +46,13 @@ def check(elf, wram, nm, scenario):
         assert report['paused']==0, 'resume failed'
     if scenario=='wall':
         assert report['wall_hits']>0 and report['grounded']==1, 'wall contact route failed'
+    if scenario=='climb':
+        assert report['climb_count']>=2 and not report['climbing'], 'terrace climb did not complete'
+        assert report['y']>=48*65536 and report['resets']==1, 'climb route missed the upper terrace'
+    if scenario=='summit':
+        assert report['boss_hp']==0 and report['star_bits']&1, 'boss defeat or star collection failed'
+    if scenario=='pond':
+        assert report['water_plane_faces']>0, 'pond surface did not submit any faces'
     # Add a second, script-friendly view without losing the raw 16.16 values.
     for name in ('x','y','z','velocity_y','camera_x','camera_y','camera_z',
                  'target_x','target_y','target_z','mario_facing','camera_fov_y',
@@ -61,6 +72,6 @@ if __name__=='__main__':
     p.add_argument('--elf',type=Path,default=root/'build/castle/sm64ds_castle.elf')
     p.add_argument('--wram',type=Path,required=True)
     p.add_argument('--nm',type=Path,default=root.parent/'saturn-tools/bin/sh2eb-elf-nm')
-    p.add_argument('--scenario',choices=('boot','controls','wall'),default='boot')
+    p.add_argument('--scenario',choices=('boot','controls','wall','climb','summit','pond'),default='boot')
     a=p.parse_args()
     print(json.dumps(check(a.elf,a.wram,a.nm,a.scenario),indent=2))

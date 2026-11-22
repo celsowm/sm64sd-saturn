@@ -16,7 +16,7 @@ import subprocess
 STAGES = 'vblank sim skin camera begin sky castle props actor support flush hud end'.split()
 HEADER = 'magic frequency_hz frames sim_steps max_sim_steps vdp1_draw_waits vdp1_draw_timeouts vdp1_late_swaps'.split()
 ROUTES = {'controls': ('castle_route.pad', 790), 'orbit': ('castle_orbit.pad', 720),
-          'bob_climb': ('bob_climb.pad', 400), 'bob_summit': ('bob_boss_fight.pad', 700),
+          'bob_climb': ('bob_climb.pad', 950), 'bob_summit': ('bob_boss_fight.pad', 510),
           'bob_route': ('bob_route.pad', 840), 'bob_orbit': ('bob_orbit.pad', 720),
           'garden_walk': ('garden_walk.pad', 260), 'wf_walk': ('wf_walk.pad', 260),
           'jrb_walk': ('jrb_walk.pad', 260), 'jrb_orbit': ('jrb_orbit.pad', 720)}

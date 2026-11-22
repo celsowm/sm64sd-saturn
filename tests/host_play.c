@@ -14,7 +14,7 @@ int main(void) {
     uint32_t offsets[17];uint16_t indices[48];
     for(int i=0;i<17;++i)offsets[i]=i*3;
     for(int i=0;i<48;++i)indices[i]=i%3;
-    sm64ds_collision_t w={prisms,offsets,indices,3,4,4,0,0,0,0u};
+    sm64ds_collision_t w={prisms,offsets,indices,3,4,4,0,0,0,0u,0};
     int32_t y;
     assert(sm64ds_floor(&w,10*O,10*O,O,&y)&&y==0);
     sat_vec3_t normal={0};
@@ -32,6 +32,7 @@ int main(void) {
     sm64ds_player_step(&p,&w,0,0,0,0);assert(p.grounded);
     for(int i=0;i<90;++i)sm64ds_player_step(&p,&w,O,0,0,1);
     assert(p.wall_hits>0&&p.feet.x<28*O&&p.feet.x>26*O);
+    assert(p.climb_count==0);
     sm64ds_player_reset(&p);sm64ds_player_step(&p,&w,0,0,0,0);
     int32_t peak=0;
     for(int i=0;i<90;++i) {
@@ -40,6 +41,41 @@ int main(void) {
     }
     assert(p.jumps==1&&p.grounded&&p.feet.y==0&&p.landings>=2);
     assert(peak>0&&peak<=7*O); /* ceiling stops the head */
+    /* A real wall contact is required to mantle onto a raised floor. */
+    {
+        const sm64ds_prism_t ledge_prisms[]={
+            prisms[0],
+            {.origin={30*O,0,0},.normal={-O,0,0},.edges={{0,-O,0},{0,0,-O},{0,O,O}},
+             .min={30*O,0,0},.max={30*O,48*O,48*O},.extent=48*O},
+            {.origin={30*O,48*O,0},.normal={0,O,0},.edges={{-O,0,0},{0,0,-O},{O,0,O}},
+             .min={30*O,48*O,0},.max={78*O,48*O,48*O},.extent=48*O}
+        };
+        sm64ds_collision_t ledge=w;
+        ledge.prisms=ledge_prisms;
+        ledge.climb_enabled=1;
+        sm64ds_player_t climber={.spawn={24*O,0,10*O}};
+        sm64ds_player_reset(&climber);
+        for(int i=0;i<6 && !climber.climbing;++i)sm64ds_player_step(&climber,&ledge,O*3/2,0,0,1);
+        assert(climber.climbing&&climber.climb_count==1&&climber.climb_top.y==48*O);
+        for(int i=0;i<4;++i)sm64ds_player_step(&climber,&ledge,0,0,0,0);
+        assert(climber.climbing&&climber.feet.x<30*O&&climber.feet.y>0);
+        for(int i=0;i<12;++i)sm64ds_player_step(&climber,&ledge,0,0,0,0);
+        assert(!climber.climbing&&climber.grounded&&climber.feet.x>30*O&&climber.feet.y==48*O);
+
+        sm64ds_player_reset(&climber);
+        for(int i=0;i<6 && !climber.climbing;++i)sm64ds_player_step(&climber,&ledge,O*3/2,0,0,1);
+        assert(climber.climbing);
+        sm64ds_player_hurt(&climber,1,-O,0);
+        assert(!climber.climbing&&climber.velocity_y==3*O);
+
+        sm64ds_player_reset(&climber);
+        for(int i=0;i<6;++i)sm64ds_player_step(&climber,&ledge,0,O,0,1);
+        assert(!climber.climbing&&climber.climb_count==2);
+
+        ledge.climb_enabled=0;
+        for(int i=0;i<10;++i)sm64ds_player_step(&climber,&ledge,O*3/2,0,0,1);
+        assert(!climber.climbing&&climber.climb_count==2);
+    }
     sat_vec3_t from={10*O,8*O,10*O},to={50*O,8*O,10*O};
     int32_t fraction=sm64ds_camera_fraction(&w,&from,&to);
     assert(fraction>0&&fraction<O/2);
@@ -100,7 +136,7 @@ int main(void) {
     uint32_t soffsets[17];uint16_t sindices[16];
     for(int i=0;i<17;++i)soffsets[i]=i;
     for(int i=0;i<16;++i)sindices[i]=0;
-    sm64ds_collision_t sw={slope_prisms,soffsets,sindices,1,4,4,0,0,(1u<<13),0u};
+    sm64ds_collision_t sw={slope_prisms,soffsets,sindices,1,4,4,0,0,(1u<<13),0u,0};
     int32_t sy=0;
     assert(sm64ds_floor(&sw,40*O,20*O,100*O,&sy));
     sm64ds_player_t sp={.spawn={40*O,sy,20*O}};
@@ -138,7 +174,7 @@ int main(void) {
         const int32_t float_y=-(O*512/100);
         /* Three 32-unit cells along x, each listing every prism. */
         uint32_t woff[4]={0,4,8,12};uint16_t windex[12]={0,1,2,3,0,1,2,3,0,1,2,3};
-        sm64ds_collision_t ww={water_prisms,woff,windex,4,3,1,0,0,0u,(1u<<2)};
+        sm64ds_collision_t ww={water_prisms,woff,windex,4,3,1,0,0,0u,(1u<<2),0};
         int32_t surface=0;
         assert(sm64ds_water_surface(&ww,30*O,10*O,-20*O,&surface)&&surface==0);
         assert(!sm64ds_water_surface(&ww,30*O,10*O,O,&surface));

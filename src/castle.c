@@ -67,6 +67,9 @@
 #include <saturn/vdp2_color_offset.h>
 #include <saturn/vdp2_layers.h>
 #endif
+#ifdef CASTLE_WATER_PLANE
+#include <saturn/water_plane.h>
+#endif
 #if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
 #include <saturn/asset.h>
 #include <saturn/audio.h>
@@ -396,6 +399,7 @@ volatile struct {
     int32_t boss_x,boss_y,boss_z;
     int32_t requested_yaw,actual_camera_yaw,camera_clearance;
     int32_t mario_facing,camera_fov_y;
+    uint32_t climbing,climb_count,water_plane_faces;
 } g_sm64ds_castle_stats={.magic=0x43415331};
 
 /* Per-stage main-loop cost in FRT ticks (sat_time_frequency_hz per second),
@@ -562,6 +566,36 @@ static void update_water_tint(void) {
     }
     if (water_tint_fade||before) (void)sat_vdp2_layers_commit();
 }
+
+#ifdef CASTLE_WATER_PLANE
+/* Build and submit the camera-centred water plane. Call after the terrain
+ * chunks, before the actors, at the water pass. */
+enum { WATER_PLANE_CELLS=4, WATER_PLANE_RINGS=4 };
+static void draw_water_plane(uint16_t pass) {
+    static sat_water_plane_t water_plane;
+    static const sat_scene3d_material_t material={
+        .kind=SAT_SCENE3D_RGB,.rgb555=SAT_RGB555(9,23,28),
+        .color_calc_slot=SAT_INDEXED_SOLID_OPAQUE,.sprite_flags=SAT_SPRITE_FLAG_MESH};
+    sat_vec3_t fwd={0,0,0};
+    const sat_vec3_t delta={camera.target.x-camera.eye.x,0,camera.target.z-camera.eye.z};
+    sat_vec3_normalize(&fwd,&delta);
+    const int32_t eye_h=camera.eye.y-CASTLE_WATER_Y;
+    const sat_water_plane_config_t cfg={
+        .min_x=CASTLE_WATER_REGION_X0,.max_x=CASTLE_WATER_REGION_X1,
+        .min_z=CASTLE_WATER_REGION_Z0,.max_z=CASTLE_WATER_REGION_Z1,
+        .surface=CASTLE_WATER_Y,.cell=8*ONE,.cells=WATER_PLANE_CELLS,.rings=WATER_PLANE_RINGS,
+        .underside=(uint8_t)(camera.eye.y<CASTLE_WATER_Y),
+        .wobble=ONE/8,.period=12*ONE,.speed=6,.tick=player.ticks,
+        .near_color=sat_gouraud_rgb(0,2,3),.far_color=sat_gouraud_rgb(6,6,4),
+        .glint=3,.forward_x=fwd.x,.forward_z=fwd.z,
+        .behind=(eye_h<0?-eye_h:eye_h)+4*ONE};
+    SAT_PANIC_IF_ERROR(sat_water_plane_build(&water_plane,&cfg,camera.eye.x,camera.eye.z));
+    const sat_scene3d_material_t rings[WATER_PLANE_RINGS]={material,material,material,material};
+    const uint16_t before=scene.faces.count;
+    SAT_PANIC_IF_ERROR(sat_water_plane_submit(&scene,&water_plane,rings,pass));
+    g_sm64ds_castle_stats.water_plane_faces=(uint16_t)(scene.faces.count-before);
+}
+#endif /* CASTLE_WATER_PLANE */
 #endif
 static void simulation(const sat_pad_state_t *pad,uint8_t jump) {
     if(pad->held&SAT_PAD_L)yaw=(yaw+358)%360;
@@ -1372,6 +1406,11 @@ int main(void) {
                 260u;
 #endif
             const uint16_t chunk_cap=(uint16_t)(2048u-overlay_reserve-extra_reserve);
+#ifdef CASTLE_WATER_PLANE
+            const uint16_t terrain_cap=chunk_cap-WATER_PLANE_RINGS*WATER_PLANE_CELLS*WATER_PLANE_CELLS;
+#else
+            const uint16_t terrain_cap=chunk_cap;
+#endif
 #ifdef CASTLE_WATER_LAYERS
             /* Faces wholly on the far side of the water surface from the camera
              * cannot be in front of the rest, so they draw first, then the water. */
@@ -1382,7 +1421,7 @@ int main(void) {
 #endif
             for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c) {
                 chunk_qfirst[c]=scene.faces.count;
-                if (scene.faces.count<chunk_cap && !exp_chunk_far(c)) {
+                if (scene.faces.count<terrain_cap && !exp_chunk_far(c)) {
                     uint16_t v0=castle_chunk_vfirst[c];
 #ifdef CASTLE_WATER_LAYERS
                     chunk_instances[c].pass=layer_pass[castle_chunk_layer[c]];
@@ -1395,6 +1434,11 @@ int main(void) {
             }
 #else
             SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&castle.instance,SAT_SCENE3D_SLOT_INHERIT,cp,0));
+#endif
+#ifdef CASTLE_WATER_PLANE
+            /* The water surface draws between the submerged terrain and the
+             * dry world / actors. */
+            draw_water_plane(SM64DS_WATER_PASS);
 #endif
         }
 #if (!SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)) || (SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FAR_DEPTH_COUNT > 0 && (SM64DS_DIAG_GEOMETRIC_DEPTH || SM64DS_DIAG_PAIR_DEPTH || SM64DS_DIAG_SUPPORT_DEPTH))
@@ -1539,6 +1583,8 @@ int main(void) {
         g_sm64ds_castle_stats.wall_hits=player.wall_hits;g_sm64ds_castle_stats.resets=player.resets;
         g_sm64ds_castle_stats.x=player.feet.x;g_sm64ds_castle_stats.y=player.feet.y;g_sm64ds_castle_stats.z=player.feet.z;
         g_sm64ds_castle_stats.velocity_y=player.velocity_y;g_sm64ds_castle_stats.grounded=player.grounded;
+        g_sm64ds_castle_stats.climbing=player.climbing;
+        g_sm64ds_castle_stats.climb_count=player.climb_count;
         g_sm64ds_castle_stats.camera_x=camera.eye.x;g_sm64ds_castle_stats.camera_y=camera.eye.y;g_sm64ds_castle_stats.camera_z=camera.eye.z;
         g_sm64ds_castle_stats.target_x=camera.target.x;g_sm64ds_castle_stats.target_y=camera.target.y;g_sm64ds_castle_stats.target_z=camera.target.z;
         g_sm64ds_castle_stats.mario_facing=facing*ONE;g_sm64ds_castle_stats.camera_fov_y=camera.fov_y;

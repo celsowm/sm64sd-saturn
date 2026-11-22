@@ -1,5 +1,6 @@
-# Bob-omb Battlefield: climb from the spawn to King Bob-omb at (96,268,-345).
-# From the spawn (-398,406) yaw 135: RIGHT heads toward +X/-Z (the hill).
+# Bob-omb Battlefield. Run east from the main entrance, then turn north into
+# the terrace walls. Capture at field 950 to check the completed climbs.
 0 NONE
-20 RIGHT+B
-2400 NONE
+30 DOWN+LEFT+B
+430 DOWN+RIGHT+B
+950 NONE
