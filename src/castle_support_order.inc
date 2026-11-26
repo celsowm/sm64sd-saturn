@@ -1,5 +1,24 @@
 /* support-plane painter ordering; textually included by castle.c. */
 #if !SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)
+#ifdef CASTLE_CHUNK_CULLING
+/* The pipeline emits support planes sorted by chunk (prepare_castle.py), so a
+ * chunk with no queued faces skips its whole run of planes at once. */
+static uint16_t support_chunk_end[CASTLE_CHUNK_COUNT] __attribute__((section(".wram_l"),aligned(4)));
+static uint8_t support_chunk_end_ready;
+static void support_chunk_end_init(void) {
+    for (uint32_t c=0;c<CASTLE_CHUNK_COUNT;++c) support_chunk_end[c]=0;
+    for (uint32_t scan=0;scan<CASTLE_SUPPORT_PLANE_COUNT;++scan)
+        support_chunk_end[castle_support_chunks[scan]]=(uint16_t)(scan+1u);
+    /* An unsorted list keeps the plane-by-plane walk. */
+    for (uint32_t scan=1;scan<CASTLE_SUPPORT_PLANE_COUNT;++scan)
+        if (castle_support_chunks[scan]<castle_support_chunks[scan-1u]) {
+            for (uint32_t c=0;c<CASTLE_CHUNK_COUNT;++c) support_chunk_end[c]=0;
+            break;
+        }
+    support_chunk_end_ready=1;
+}
+#endif
+
 /* Push walkable terrain planes that lie strictly beneath Mario and the camera
  * behind Mario's farthest painter depth so sloped hills cannot sort over him. */
 static void order_support_behind_actor(uint16_t castle_first,uint16_t castle_end,
@@ -46,6 +65,9 @@ static void order_support_behind_actor(uint16_t castle_first,uint16_t castle_end
         }
     }
     if (ax0>ax1 || ay0>ay1) return;
+#ifdef CASTLE_CHUNK_CULLING
+    if (!support_chunk_end_ready) support_chunk_end_init();
+#endif
 
     for (uint32_t scan=0;scan<CASTLE_SUPPORT_PLANE_COUNT;++scan) {
 #ifdef CASTLE_ROOM_CULLING
@@ -56,7 +78,10 @@ static void order_support_behind_actor(uint16_t castle_first,uint16_t castle_end
 #elif defined(CASTLE_CHUNK_CULLING)
         uint8_t schunk=castle_support_chunks[scan];
         uint16_t qfirst=chunk_qfirst[schunk],qend=chunk_qend[schunk];
-        if (qfirst>=qend) continue;
+        if (qfirst>=qend) {
+            if (support_chunk_end[schunk]>scan+1u) scan=support_chunk_end[schunk]-1u;
+            continue;
+        }
         uint16_t vbase=castle_chunk_vfirst[schunk];
 #else
         const uint16_t qfirst=castle_first,qend=castle_end;
@@ -124,14 +149,15 @@ static void order_support_behind_actor(uint16_t castle_first,uint16_t castle_end
     for (uint16_t q=castle_first;q<castle_end;++q) {
         uint32_t qk=scene.faces.keys[q];
         if ((qk>>24)!=group || (qk&0xffffffu)>=actor_max) continue;
-        sat_scene3d_face_t expanded;
-        if (sat_scene3d_faces_get(&scene.faces,q,&expanded)!=SAT_OK) continue;
-        if (expanded.projected_safe) continue;
-        int32_t min_x=expanded.world.v[0].x,max_x=min_x;
-        int32_t min_y=expanded.world.v[0].y,max_y=min_y;
-        int32_t min_z=expanded.world.v[0].z,max_z=min_z;
+        /* Hot projected entries are always projected-safe: only a full
+         * record can be a clipped fallback, and it is read in place. */
+        const sat_scene3d_face_t *full=sat_scene3d_faces_full(&scene.faces,q);
+        if (!full || full->projected_safe) continue;
+        int32_t min_x=full->world.v[0].x,max_x=min_x;
+        int32_t min_y=full->world.v[0].y,max_y=min_y;
+        int32_t min_z=full->world.v[0].z,max_z=min_z;
         for (unsigned k=1;k<4;++k) {
-            int32_t wx=expanded.world.v[k].x,wy=expanded.world.v[k].y,wz=expanded.world.v[k].z;
+            int32_t wx=full->world.v[k].x,wy=full->world.v[k].y,wz=full->world.v[k].z;
             if (wx<min_x) min_x=wx;
             if (wx>max_x) max_x=wx;
             if (wy<min_y) min_y=wy;

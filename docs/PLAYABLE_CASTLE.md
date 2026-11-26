@@ -264,3 +264,41 @@ routes run at 64.6 (controls) and 63.4 (orbit) ms/draw. Results are in
   (water build 5.7% to 4.0% of samples).
 - `keys`, `order`, `textures`, `materials` and `hmat` moved to Low WRAM to
   make room for the dual-SH-2 runtime in High WRAM.
+
+### Phase 3: cheaper fallback faces, a larger Slave share
+
+Probe, injection boot (not a hardware measurement). "Before" is Phase 2 as
+committed (`e87cc1c` with LibSaturn `e07b4cc2`), "after" adds LibSaturn
+`700f88f4` and the changes below. The same routes with the textured 8-cell
+water from development went from 85.4 to 70.1 ms (controls) and 82.9 to 69.8
+ms (orbit).
+
+| Route | Before ms/draw | After ms/draw |
+| --- | ---: | ---: |
+| castle controls | 64.6 | 61.4 |
+| castle orbit | 63.4 | 56.7 |
+| bob_route | 45.6 | 43.8 |
+| garden_walk | 39.7 | 37.7 |
+| wf_walk | 47.1 | 47.1 |
+| jrb_orbit | 43.7 | 39.4 |
+
+- The Slave takes the farthest three quarters of the visible faces
+  (`SLAVE_SHARE_NUM`/`SLAVE_SHARE_DEN`). With an even split the Master,
+  which also builds the water and props, still had work left when the Slave
+  finished: it waited 0.4 ms a frame at the merge. 3/5, 2/3, 4/5 and 7/8 were
+  all slower than 3/4 on the castle routes.
+- The chunk cull builds its planes once a frame and tests each chunk with
+  32-bit camera-relative arithmetic. The rounding error is bounded and added
+  back as slack, so it never culls a chunk the exact 64-bit test keeps
+  (800,000 random boxes and matrices: none wrong, 0.04% kept extra). The
+  Slave's chunks are picked by one sort instead of a repeated farthest scan.
+- Support ordering skips the planes of chunks with no queued faces (the
+  pipeline emits planes sorted by chunk) and reads fallback faces in place
+  with `sat_scene3d_faces_full` instead of copying every queued face.
+- LibSaturn: near-clipped fallback faces (74 to 90 a frame on the castle
+  routes) keep 32-bit clip coordinates, clip only against the planes a corner
+  is outside of, divide on the SH-2 divider and reuse their clip transforms
+  for projection. Grid-tiled faces form each shared cell corner once. Flush
+  went from 31.6 to 25.2 ms a draw on castle controls.
+- Mario's head mesh tables and textures moved to Low WRAM: the castle ELF
+  links with the 16 KiB Master stack reserve and has little High WRAM to spare.

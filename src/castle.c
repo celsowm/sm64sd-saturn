@@ -245,8 +245,10 @@ static sat_scene3d_material_t cmat[CT*2] __attribute__((section(".wram_l"),align
 static sat_projected_vertex_t cp[CN] __attribute__((section(".wram_l"),aligned(4)));
 static sm64ds_background_t head;
 static sat_vec3_t hv[HN],hw[HN];
-static uint16_t hi[HF*4],hm[HF];
-static sat_vdp1_texture_t ht[HT];
+/* Head mesh tables and textures are written once at setup, like ct/cmat. */
+static uint16_t hi[HF*4] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t hm[HF] __attribute__((section(".wram_l"),aligned(4)));
+static sat_vdp1_texture_t ht[HT] __attribute__((section(".wram_l"),aligned(4)));
 static sat_scene3d_material_t hmat[HT] __attribute__((section(".wram_l"),aligned(4)));
 static sat_projected_vertex_t hp[HN];
 /* Procedural 16x16 LUT4 circular drop shadow for grounding Mario. */

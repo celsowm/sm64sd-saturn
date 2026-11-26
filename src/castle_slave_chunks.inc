@@ -1,8 +1,8 @@
 /* Castle chunk preparation on both SH-2s; textually included by castle.c.
  *
  * The Master culls every chunk against the view frustum itself, then hands
- * the visible chunks farthest from the camera (about half of the visible
- * faces) to the Slave as one lib-saturn prepare batch, which writes straight
+ * the visible chunks farthest from the camera (about three quarters of the
+ * visible faces) to the Slave as one lib-saturn prepare batch, which writes straight
  * into a span reserved in the scene queue. The Master submits the nearer
  * chunks and the water meanwhile, then merges. The batch reports each item's
  * face count, so every chunk still has its exact chunk_qfirst/qend run in the
@@ -24,12 +24,23 @@
 
 static sat_scene3d_prepare_item_t slave_items[CASTLE_CHUNK_COUNT] __attribute__((section(".wram_l"),aligned(4)));
 static uint16_t slave_item_faces[CASTLE_CHUNK_COUNT] __attribute__((section(".wram_l"),aligned(4)));
-/* The Slave takes at most half the visible faces. */
-#define SLAVE_FACE_CAP (CAP/2u)
+/* The Slave takes the farthest SLAVE_SHARE_NUM/SLAVE_SHARE_DEN of the visible
+ * faces: the Master also builds the water and the props meanwhile, so an even
+ * split leaves the Slave idle at the merge. */
+#ifndef SLAVE_SHARE_NUM
+#define SLAVE_SHARE_NUM 3u
+#endif
+#ifndef SLAVE_SHARE_DEN
+#define SLAVE_SHARE_DEN 4u
+#endif
+#define SLAVE_FACE_CAP (CAP*SLAVE_SHARE_NUM/SLAVE_SHARE_DEN)
 static uint32_t slave_keys[SLAVE_FACE_CAP] __attribute__((section(".wram_l"),aligned(4)));
 static sat_scene3d_prepare_batch_t slave_batch __attribute__((section(".wram_l"),aligned(4)));
-static uint8_t slave_chunk_ids[CASTLE_CHUNK_COUNT];
-static uint8_t chunk_visible[CASTLE_CHUNK_COUNT],chunk_on_slave[CASTLE_CHUNK_COUNT];
+static uint8_t slave_chunk_ids[CASTLE_CHUNK_COUNT] __attribute__((section(".wram_l"),aligned(4)));
+static uint8_t chunk_visible[CASTLE_CHUNK_COUNT] __attribute__((section(".wram_l"),aligned(4)));
+static uint8_t chunk_on_slave[CASTLE_CHUNK_COUNT] __attribute__((section(".wram_l"),aligned(4)));
+static uint8_t chunk_rank[CASTLE_CHUNK_COUNT] __attribute__((section(".wram_l"),aligned(4)));
+static uint32_t chunk_dist[CASTLE_CHUNK_COUNT] __attribute__((section(".wram_l"),aligned(4)));
 static uint8_t slave_ready;
 /* Direct batch spans index the projected queue; High WRAM has the room. */
 static uint16_t projected_order[CAP];
@@ -82,25 +93,100 @@ static void slave_chunks_stop(void) {
     slave_ready=0;
 }
 
-static int chunk_in_frustum(const sat_mat4_t *vp,const sat_aabb3_t *b) {
+/* The six clip planes, built once per frame from the view-projection rows.
+ * A plane that does not fit 32 bits is left out (conservative: keep).
+ *
+ * Each plane also gets a 32-bit form for the per-chunk test: its normal
+ * scaled down below 2^13 and taken relative to the camera, so the test is
+ * nine 32-bit multiplies instead of six 64-bit ones and their spills. Every
+ * rounding is bounded and added back as slack, so the fast test only ever
+ * keeps a chunk the exact 64-bit test would keep too (it never culls more). */
+typedef struct {
+    int32_t n[4];          /* exact plane, for the 64-bit test */
+    int32_t fn[3],fa[3];   /* floor(n/2^s) and |floor(n/2^s)|+1 */
+    int32_t base,slack;    /* floor(plane(eye)/2^(s+16)); rounding bound */
+    uint8_t fast;
+} frustum_plane_t;
+static frustum_plane_t frustum_planes[6] __attribute__((section(".wram_l"),aligned(4)));
+static uint8_t frustum_plane_count;
+static sat_vec3_t frustum_eye;
+
+static void frustum_build(const sat_mat4_t *vp,const sat_vec3_t *eye) {
     const int32_t *m=vp->m;
+    frustum_plane_count=0;
+    frustum_eye=*eye;
     for (unsigned p=0;p<6u;++p) {
         const unsigned k=4u*(p>>1);
         const int64_t s=(p&1u)?-1:1;
         const int64_t n64[4]={m[12]+s*m[k],m[13]+s*m[k+1],m[14]+s*m[k+2],m[15]+s*m[k+3]};
-        int32_t n[4];
-        for (unsigned i=0;i<4u;++i) {
-            if (n64[i]<INT32_MIN || n64[i]>INT32_MAX) return 1;  /* keep: conservative */
-            n[i]=(int32_t)n64[i];
+        int fits=1;
+        for (unsigned i=0;i<4u;++i)
+            if (n64[i]<INT32_MIN || n64[i]>INT32_MAX) fits=0;
+        if (!fits) continue;
+        frustum_plane_t *fp=&frustum_planes[frustum_plane_count++];
+        for (unsigned i=0;i<4u;++i) fp->n[i]=(int32_t)n64[i];
+        int64_t maxn=0;
+        for (unsigned i=0;i<3u;++i) {
+            const int64_t a=fp->n[i]<0?-(int64_t)fp->n[i]:fp->n[i];
+            if (a>maxn) maxn=a;
         }
-        /* 32.32 plane value at the centre, and its largest gain over the box. */
-        const int64_t centre=(int64_t)n[0]*b->center.x+(int64_t)n[1]*b->center.y+
-                             (int64_t)n[2]*b->center.z+((int64_t)n[3]<<16);
-        const int64_t reach=(int64_t)(n[0]<0?-n[0]:n[0])*b->half.x+
-                            (int64_t)(n[1]<0?-n[1]:n[1])*b->half.y+
-                            (int64_t)(n[2]<0?-n[2]:n[2])*b->half.z;
-        /* The margin covers the library's per-term 16.16 truncation. */
-        if (centre+reach < -((int64_t)64<<16)) return 0;
+        unsigned shift=0;
+        while (shift<31u && (maxn>>shift)>=(1<<13)) ++shift;
+        int32_t sum_abs=0;
+        for (unsigned i=0;i<3u;++i) {
+            fp->fn[i]=fp->n[i]>>shift;
+            const int32_t a=fp->fn[i]<0?-fp->fn[i]:fp->fn[i];
+            fp->fa[i]=a+1;
+            sum_abs+=a;
+        }
+        const int64_t at_eye=(int64_t)fp->n[0]*eye->x+(int64_t)fp->n[1]*eye->y+
+                             (int64_t)fp->n[2]*eye->z+(int64_t)fp->n[3]*65536;
+        const int64_t base=at_eye>>(shift+16u);
+        /* |n'd| and |n'|h stay below 3*2^28 each, so the sum fits int32. */
+        fp->fast=base>-(1<<28) && base<(1<<28);
+        fp->base=fp->fast?(int32_t)base:0;
+        /* n*d rounding (sum|n'|+sum|d'|+3), the eye term (1), and the exact
+         * test's 64<<16 truncation margin in these units. */
+        fp->slack=sum_abs+4+((shift<6u?(64>>shift):0)+1);
+    }
+}
+
+static int plane_keeps_exact(const frustum_plane_t *fp,const sat_aabb3_t *b) {
+    const int32_t *n=fp->n;
+    /* 32.32 plane value at the centre, and its largest gain over the box. */
+    const int64_t centre=(int64_t)n[0]*b->center.x+(int64_t)n[1]*b->center.y+
+                         (int64_t)n[2]*b->center.z+(int64_t)n[3]*65536;
+    const int64_t reach=(int64_t)(n[0]<0?-n[0]:n[0])*b->half.x+
+                        (int64_t)(n[1]<0?-n[1]:n[1])*b->half.y+
+                        (int64_t)(n[2]<0?-n[2]:n[2])*b->half.z;
+    /* The margin covers the library's per-term 16.16 truncation. */
+    return centre+reach >= -((int64_t)64<<16);
+}
+
+static int chunk_in_frustum(const sat_aabb3_t *b) {
+    /* Whole units from the eye (floor) and half extents rounded up; outside
+     * +-2^15 units the exact test runs instead. */
+    int32_t d[3],h[3];
+    const int32_t c[3]={b->center.x,b->center.y,b->center.z};
+    const int32_t e[3]={frustum_eye.x,frustum_eye.y,frustum_eye.z};
+    const int32_t hh[3]={b->half.x,b->half.y,b->half.z};
+    int32_t sum_d=0;
+    int fast=1;
+    for (unsigned i=0;i<3u;++i) {
+        const int64_t delta=((int64_t)c[i]-e[i])>>16;
+        if (delta<=-(1<<15) || delta>=(1<<15) || hh[i]<0) {fast=0;break;}
+        d[i]=(int32_t)delta;
+        h[i]=(hh[i]>>16)+1;
+        sum_d+=d[i]<0?-d[i]:d[i];
+    }
+    for (unsigned p=0;p<frustum_plane_count;++p) {
+        const frustum_plane_t *fp=&frustum_planes[p];
+        if (fast && fp->fast) {
+            const int32_t v=fp->base+fp->slack+sum_d+
+                fp->fn[0]*d[0]+fp->fn[1]*d[1]+fp->fn[2]*d[2]+
+                fp->fa[0]*h[0]+fp->fa[1]*h[1]+fp->fa[2]*h[2];
+            if (v<0) return 0;
+        } else if (!plane_keeps_exact(fp,b)) return 0;
     }
     return 1;
 }
@@ -124,11 +210,15 @@ static void submit_chunk(uint8_t c) {
 static int slave_chunks_begin(uint16_t terrain_cap) {
     uint32_t visible_faces=0;
     uint8_t visible_count=0;
+    frustum_build(&scene.faces.view_proj,&camera.eye);
     for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c) {
         chunk_on_slave[c]=0;
-        chunk_visible[c]=!exp_chunk_far(c) &&
-            chunk_in_frustum(&scene.faces.view_proj,&castle_chunk_bounds[c]);
-        if (chunk_visible[c]) {visible_faces+=castle_chunk_count[c];++visible_count;}
+        chunk_visible[c]=!exp_chunk_far(c) && chunk_in_frustum(&castle_chunk_bounds[c]);
+        if (chunk_visible[c]) {
+            chunk_dist[visible_count]=chunk_distance2(c);
+            chunk_rank[visible_count]=c;
+            visible_faces+=castle_chunk_count[c];++visible_count;
+        }
     }
     if (!slave_ready || visible_count<2u) return 0;
     /* The reservation holds the Slave's worst case until the next frame, so
@@ -138,17 +228,22 @@ static int slave_chunks_begin(uint16_t terrain_cap) {
         ++g_sm64ds_slave_stats.skipped;
         return 0;
     }
-    /* Farthest first until half the visible faces: the near chunks under
-     * Mario stay on the Master. */
-    uint32_t slave_faces=0;
-    while (slave_faces*2u<visible_faces) {
-        uint8_t best=0xffu;uint32_t best_d=0;
-        for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c) {
-            if (!chunk_visible[c] || chunk_on_slave[c]) continue;
-            uint32_t d=chunk_distance2(c);
-            if (best==0xffu || d>best_d) {best=c;best_d=d;}
+    /* Farthest first until the Slave's share of the visible faces: the near
+     * chunks under Mario stay on the Master. */
+    /* Insertion sort of the visible chunks, farthest first (ties keep the
+     * lower chunk id first, as the old repeated max scan did). */
+    for (uint8_t i=1;i<visible_count;++i) {
+        const uint32_t d=chunk_dist[i];const uint8_t c=chunk_rank[i];
+        uint8_t j=i;
+        while (j>0u && chunk_dist[j-1u]<d) {
+            chunk_dist[j]=chunk_dist[j-1u];chunk_rank[j]=chunk_rank[j-1u];--j;
         }
-        if (best==0xffu || slave_faces+castle_chunk_count[best]>SLAVE_FACE_CAP) break;
+        chunk_dist[j]=d;chunk_rank[j]=c;
+    }
+    uint32_t slave_faces=0;
+    for (uint8_t i=0;i<visible_count && slave_faces*SLAVE_SHARE_DEN<visible_faces*SLAVE_SHARE_NUM;++i) {
+        const uint8_t best=chunk_rank[i];
+        if (slave_faces+castle_chunk_count[best]>SLAVE_FACE_CAP) break;
         chunk_on_slave[best]=1;
         slave_faces+=castle_chunk_count[best];
     }
