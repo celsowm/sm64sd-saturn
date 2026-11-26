@@ -507,10 +507,50 @@ void sm64ds_player_step(sm64ds_player_t *p,const sm64ds_collision_t *w,
     }
     if(p->feet.y< -160*ONE)sm64ds_player_reset(p);
 }
+/* Clamp a world coordinate to a grid column/row index in [0, n). */
+static int grid_index(int32_t v,int32_t origin,uint16_t n) {
+    int32_t a=v-origin;
+    if(a<0)return 0;
+    a/=32*ONE;
+    return a<n?a:n-1;
+}
+static int32_t camera_test(const sm64ds_prism_t *p,const sat_vec3_t *from,
+                           const sat_vec3_t *to,sat_vec3_t delta,int32_t best) {
+    if((from->x<p->min.x&&to->x<p->min.x)||(from->x>p->max.x&&to->x>p->max.x)||
+       (from->y<p->min.y&&to->y<p->min.y)||(from->y>p->max.y&&to->y>p->max.y)||
+       (from->z<p->min.z&&to->z<p->min.z)||(from->z>p->max.z&&to->z>p->max.z))return best;
+    int32_t a=dot(sub(*from,p->origin),p->normal),b=dot(sub(*to,p->origin),p->normal);
+    if((a>=0&&b>=0)||(a<=0&&b<=0)||a==b)return best;
+    int32_t t=(int32_t)((int64_t)a*ONE/(a-b));
+    if(t>=best)return best;
+    sat_vec3_t hit={from->x+mul(delta.x,t),from->y+mul(delta.y,t),from->z+mul(delta.z,t)};
+    return inside(p,hit,ONE/16)?t:best;
+}
+/* The KCL grid bins every prism into each 32-unit cell its XZ bounds (+4
+ * units) touch, and spans all prisms, so the cells under the segment's XZ
+ * bounding box hold every prism the segment can hit. A prism listed in
+ * several of those cells is tested more than once, which cannot change the
+ * minimum. Without a grid, every prism is tested. */
 int32_t sm64ds_camera_fraction(const sm64ds_collision_t *w,
                                const sat_vec3_t *from,const sat_vec3_t *to) {
     int32_t best=ONE;
     sat_vec3_t delta=sub(*to,*from);
+    if(w->offsets&&w->indices&&w->nx&&w->nz) {
+        const int x0=grid_index(from->x<to->x?from->x:to->x,w->origin_x,w->nx);
+        const int x1=grid_index(from->x<to->x?to->x:from->x,w->origin_x,w->nx);
+        const int z0=grid_index(from->z<to->z?from->z:to->z,w->origin_z,w->nz);
+        const int z1=grid_index(from->z<to->z?to->z:from->z,w->origin_z,w->nz);
+        for(int z=z0;z<=z1;++z)
+            for(int x=x0;x<=x1;++x) {
+                const int bin=z*w->nx+x;
+                for(uint32_t k=w->offsets[bin];k<w->offsets[bin+1];++k) {
+                    const sm64ds_prism_t *p=&w->prisms[w->indices[k]];
+                    if(is_water_floor(w,p))continue;   /* the camera sees through water */
+                    best=camera_test(p,from,to,delta,best);
+                }
+            }
+        return best<ONE?(best>ONE/16?best-ONE/16:ONE/32):ONE;
+    }
     for(uint16_t i=0;i<w->count;++i) {
         const sm64ds_prism_t *p=&w->prisms[i];
         if(is_water_floor(w,p))continue;   /* the camera sees through water */

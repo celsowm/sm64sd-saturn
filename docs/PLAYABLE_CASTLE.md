@@ -225,3 +225,42 @@ Remaining fallback emission is still ~26–29 ms per draw. Subdividing large
 near-camera textured faces would remove both that cost and the untextured
 ground, and is the larger remaining lever beside Slave SH-2 preparation of
 the castle chunks (24–29 ms).
+
+### Phase 2: Slave SH-2 chunk preparation
+
+Measured against the same tree built with `-DSM64DS_NO_SLAVE` (probe,
+injection boot; not a hardware measurement), with the textured 8-cell water
+plane in development at the time. With the committed 4-cell water the castle
+routes run at 64.6 (controls) and 63.4 (orbit) ms/draw. Results are in
+`private/frame-profile/noslave/` and `private/frame-profile/slave-final/`.
+
+| Route | Slave off ms/draw | Slave on ms/draw |
+| --- | ---: | ---: |
+| castle controls | 96.3 | 85.4 |
+| castle orbit | 93.7 | 82.9 |
+| bob_route | 54.6 | 45.9 |
+| bob_orbit | 36.8 | 34.9 |
+| garden_walk | 49.4 | 45.3 |
+| wf_walk | 53.9 | 47.0 |
+| jrb_walk / jrb_orbit | 30.8 / 43.6 | unchanged (split off) |
+
+- `src/castle_slave_chunks.inc`: the Master culls chunks against the view
+  frustum, hands the farthest visible chunks (about half the faces) to the
+  Slave as one LibSaturn prepare batch into a reserved queue span, submits the
+  near chunks and the water meanwhile, then merges. The batch's new
+  `item_faces` output keeps an exact `chunk_qfirst`/`qend` run per chunk for
+  support ordering. A failed batch is redone on the Master; the counters are
+  in `g_sm64ds_slave_stats`.
+- Each chunk carries a source plan, so its ranges are published once instead
+  of being re-walked every frame. The split is enabled only for stages with
+  at most 96 chunks: without plans the per-frame walk made JRB (150 chunks,
+  no WRAM left for plans) slower, 43.6 to 78.7 ms on jrb_orbit.
+- Camera line tests walk only the KCL grid cells under the segment (camera
+  3 to 0.7 ms).
+- LibSaturn: the prepare-batch material table sync is skipped when an item
+  shares the previous item's table; a cache invalidate longer than the
+  4 KiB cache purges the whole cache in one CCR write; the water plane
+  splits its colours once per build instead of shifting per vertex
+  (water build 5.7% to 4.0% of samples).
+- `keys`, `order`, `textures`, `materials` and `hmat` moved to Low WRAM to
+  make room for the dual-SH-2 runtime in High WRAM.

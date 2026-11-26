@@ -141,8 +141,8 @@ SAT_MUSIC_CODECS_ADX_FROM_DISC_ONLY;
 static sat_vec3_t vertices[N],world_vertices[N];
 static uint16_t indices[F*4],face_materials[F];
 static sat_mesh_t mesh;
-static sat_vdp1_texture_t textures[T];
-static sat_scene3d_material_t materials[T];
+static sat_vdp1_texture_t textures[T] __attribute__((section(".wram_l"),aligned(4)));
+static sat_scene3d_material_t materials[T] __attribute__((section(".wram_l"),aligned(4)));
 #if SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FACE_IDS
 static sat_scene3d_material_t diagnostic_face_materials[F] __attribute__((section(".wram_l"),aligned(4)));
 #endif
@@ -188,8 +188,9 @@ static sat_scene3d_instance_binding_t room_bindings[CASTLE_ROOM_COUNT];
 static sat_scene3d_instance_binding_t chunk_bindings[CASTLE_CHUNK_COUNT] __attribute__((section(".wram_l"),aligned(4)));
 #endif
 #endif
-static uint32_t keys[CAP];
-static uint16_t order[CAP];
+/* Low WRAM: the High WRAM image also holds the dual-SH-2 runtime. */
+static uint32_t keys[CAP] __attribute__((section(".wram_l"),aligned(4)));
+static uint16_t order[CAP] __attribute__((section(".wram_l"),aligned(4)));
 static sat_scene_t scene;
 static sat_ascii_font_t font;
 static sm64ds_background_t castle;
@@ -246,7 +247,7 @@ static sm64ds_background_t head;
 static sat_vec3_t hv[HN],hw[HN];
 static uint16_t hi[HF*4],hm[HF];
 static sat_vdp1_texture_t ht[HT];
-static sat_scene3d_material_t hmat[HT];
+static sat_scene3d_material_t hmat[HT] __attribute__((section(".wram_l"),aligned(4)));
 static sat_projected_vertex_t hp[HN];
 /* Procedural 16x16 LUT4 circular drop shadow for grounding Mario. */
 static const sat_vec3_t shadow_vertices[4]={{0,0,0},{ONE,0,0},{ONE,0,ONE},{0,0,ONE}};
@@ -689,6 +690,7 @@ static int exp_chunk_far(uint8_t c) {
     return dx*dx+dz*dz>far_cull*far_cull;
 }
 #endif
+#include "castle_slave_chunks.inc"
 
 #include "castle_sky.inc"
 
@@ -762,9 +764,15 @@ static void execute_stage_warp(const sm64ds_warp_t *target) {
 #if SM64DS_VDP2_SKY
         sky_shutdown();
 #endif
+#ifdef CASTLE_SLAVE_CHUNKS
+        slave_chunks_stop();
+#endif
         (void)sat_exec(&cd_volume,target->bin,&out_arg,sizeof(out_arg));
 #if SM64DS_VDP2_SKY
         sky_init();
+#endif
+#ifdef CASTLE_SLAVE_CHUNKS
+        slave_chunks_init();
 #endif
     }
     /* If the target binary is absent (e.g. standalone single-stage test disc),
@@ -1090,6 +1098,10 @@ int main(void) {
         chunk_bindings[c].programs=&castle_programs;
         chunk_instances[c].validated_binding=&chunk_bindings[c];
     }
+#ifdef CASTLE_SLAVE_CHUNKS
+    slave_chunks_setup();
+    slave_chunks_init();
+#endif
 #else
     SAT_PANIC_IF_ERROR(sat_scene3d_instance_binding_init(&castle_binding,&castle.mesh,cmat,CT*2,cm));
     castle_binding.programs=&castle_programs;castle.instance.validated_binding=&castle_binding;
@@ -1419,6 +1431,27 @@ int main(void) {
                 camera_above?SM64DS_FAR_WATER_PASS:SM64DS_ACTOR_PASS,SM64DS_WATER_PASS,
                 camera_above?SM64DS_ACTOR_PASS:SM64DS_FAR_WATER_PASS};
 #endif
+#ifdef CASTLE_SLAVE_CHUNKS
+#ifdef CASTLE_WATER_LAYERS
+            for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c)
+                chunk_instances[c].pass=layer_pass[castle_chunk_layer[c]];
+#endif
+            const int slave_pending=slave_chunks_begin(terrain_cap);
+            for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c) {
+                chunk_qfirst[c]=chunk_qend[c]=scene.faces.count;
+                if (!chunk_visible[c] || chunk_on_slave[c]) continue;
+                if (scene.faces.count+scene.faces.projected_gap<terrain_cap) submit_chunk(c);
+                chunk_qend[c]=scene.faces.count;
+            }
+#ifdef CASTLE_WATER_PLANE
+            /* Built and queued while the Slave works; it still lands inside
+             * the castle range, ahead of the Slave's chunks. */
+            draw_water_plane(SM64DS_WATER_PASS);
+#endif
+            if (slave_pending) slave_chunks_finish();
+            for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c)
+                if (chunk_qend[c]>chunk_qfirst[c]) ++hud_chunks_drawn;
+#else
             for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c) {
                 chunk_qfirst[c]=scene.faces.count;
                 if (scene.faces.count<terrain_cap && !exp_chunk_far(c)) {
@@ -1432,10 +1465,11 @@ int main(void) {
                 chunk_qend[c]=scene.faces.count;
                 if (chunk_qend[c]>chunk_qfirst[c]) ++hud_chunks_drawn;
             }
+#endif
 #else
             SAT_PANIC_IF_ERROR(sat_scene_submit_instance(&scene,&castle.instance,SAT_SCENE3D_SLOT_INHERIT,cp,0));
 #endif
-#ifdef CASTLE_WATER_PLANE
+#if defined(CASTLE_WATER_PLANE) && !defined(CASTLE_SLAVE_CHUNKS)
             /* The water surface draws between the submerged terrain and the
              * dry world / actors. */
             draw_water_plane(SM64DS_WATER_PASS);
