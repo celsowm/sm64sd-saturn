@@ -318,6 +318,48 @@ ms (orbit).
 - Mario's head mesh tables and textures moved to Low WRAM: the castle ELF
   links with the 16 KiB Master stack reserve and has little High WRAM to spare.
 
+### Phase 4: smaller water grid and a rebalanced Slave split
+
+Probe, injection boot (not a hardware measurement). Baseline is the Phase 3
+build at the start of this work (`0c8485e`, 8x8 textured water, 3/4 Slave
+share). Each row is a fresh `tools/profile_castle_frames.py` run with
+`--routes controls orbit`; reports are under `private/frame-profile/`.
+
+| Change | controls ms/draw | orbit ms/draw |
+| --- | ---: | ---: |
+| Phase 3 baseline (`current/`) | 70.11 | 70.16 |
+| Exact support-scan guard + 4x4 water grid (`final-4x4/`) | 60.75 | 56.30 |
+| Slave share 2/3 (`slave-2of3/`) | 59.77 | 54.21 |
+| Slave share 1/2 (`slave-1of2/`) | **54.81** | **53.06** |
+
+- The camera-centred water plane keeps its 4 rings and +-512-unit reach but
+  uses a 4x4 grid with 32-unit cells instead of 8x8 cells at 16 units. Water
+  faces per draw fell 152 to 48, near-clip fallback faces 74 to 44, and
+  `sat_water_plane_build` dropped from 5.8% to 2.1% of PC samples. The coarser
+  near-field wave/tile grid is the visual trade-off; the spawn moat capture in
+  `private/frame-profile/final-4x4/controls-final.png` still shows the original
+  water placement.
+- `order_support_behind_actor` can only push a near-clipped floor when the
+  camera is at most 3/4 unit above Mario's feet. The full castle-queue scan is
+  now guarded by that same condition, so ordinary third-person views skip it
+  without changing which faces are pushed.
+- Later reverted: the water grid is back to 8x8 cells of 16 units
+  (`8d0ace7`), since the coarser grid's look was never checked. The water
+  now draws with the VDP1 mesh (translucent, half the pixels) and Mario
+  splits at the surface, so the table above is no longer the current build.
+- With the cheaper water grid the Master had less to do, and the Slave spent
+  about 11 ms per merged frame waiting at 3/4 share. Rebalancing to half the
+  visible faces cut the wait and the castle submit stage: 25.54 to 20.17
+  controls, 19.75 to 16.65 orbit. The Slave still reports zero fallbacks and
+  zero capacity skips, with 88/88 source plans.
+- Final stage split (controls/orbit): castle 20.17/16.65 ms, flush 18.53/19.19,
+  support 3.34/3.27, simulation 2.61/2.84. Flush remains fallback-bound
+  (`side_clip_piece` is still the top PC symbol), so further large wins need
+  geometry/clipping work or the 64-bit division helpers in LibSaturn.
+- These numbers predate the in-flight actor water-split in `src/castle.c`.
+  Re-profile after that change links; its extra per-face pass work may move
+  the optimum Slave share again. 113 host tests pass.
+
 ## Guided video: intro to King Bob-omb
 
 `tools/make_guided_video.py` renders one uncut playthrough from the title

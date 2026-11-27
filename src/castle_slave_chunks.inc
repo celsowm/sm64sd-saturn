@@ -28,10 +28,10 @@ static uint16_t slave_item_faces[CASTLE_CHUNK_COUNT] __attribute__((section(".wr
  * faces: the Master also builds the water and the props meanwhile, so an even
  * split leaves the Slave idle at the merge. */
 #ifndef SLAVE_SHARE_NUM
-#define SLAVE_SHARE_NUM 3u
+#define SLAVE_SHARE_NUM 1u
 #endif
 #ifndef SLAVE_SHARE_DEN
-#define SLAVE_SHARE_DEN 4u
+#define SLAVE_SHARE_DEN 2u
 #endif
 #define SLAVE_FACE_CAP (CAP*SLAVE_SHARE_NUM/SLAVE_SHARE_DEN)
 static uint32_t slave_keys[SLAVE_FACE_CAP] __attribute__((section(".wram_l"),aligned(4)));
