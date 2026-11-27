@@ -23,6 +23,10 @@ CMN_PAL_PATH = "data/2D_cad/d_2d_cmn_icon_ncl.bin"
 CLOUD_OBJ_NCG_PATH = "data/2D_cad/d_2d_op_obj_cl_ncg.bin"
 CLOUD_OBJ_NCL_PATH = "data/2D_cad/d_2d_op_obj_cl_ncl.bin"
 PEACH_LETTER_BMD_PATH = "data/normal_obj/opening/USA/peach_letter_US.bmd"
+# Real boot/title logo art (used by the title screen and IPL splash).
+NINTENDO_LOGO_NSC_PATH = "data/2D_cad/d_2d_nintendo_logo_nsc.bin"
+MARIO64DS_IPL_NCG_PATH = "data/2D_cad/d_2d_MARIO64DS_IPL_download_ncg.bin"
+MARIO64DS_IPL_NCL_PATH = "data/2D_cad/d_2d_MARIO64DS_IPL_download_ncl.bin"
 
 
 @dataclass(frozen=True)
@@ -296,3 +300,99 @@ def extract_cloud_atlas(fs: Filesystem) -> CloudAtlas4bpp:
             # Saturn 4bpp order: high nibble = left pixel, low nibble = right pixel
             packed[(y * width + x) >> 1] = ((c0 & 0xF) << 4) | (c1 & 0xF)
     return CloudAtlas4bpp(width=width, height=height, pixels=bytes(packed), palette=pals[0])
+
+
+def decode_ncl_palette16(blob: bytes, *, direct: bool = True) -> tuple[int, ...]:
+    """Decode a single 16-entry DS NCL palette (32 bytes) to Saturn BGR555."""
+    data = lz77_auto(blob)
+    if len(data) < 32:
+        raise FormatError(f"invalid NCL16 length: {len(data)}")
+    return tuple(
+        ds_bgr555_to_saturn(struct.unpack_from("<H", data, i * 2)[0], direct=direct)
+        for i in range(16)
+    )
+
+
+def _sample_ncg_8bpp(ncg: bytes, tile_id: int, x: int, y: int) -> int:
+    off = tile_id * 64 + y * 8 + x
+    return ncg[off] if off < len(ncg) else 0
+
+
+def decode_8bpp_tile_sprite(
+    ncg: bytes,
+    palette: tuple[int, ...],
+    *,
+    tiles_x: int,
+    tiles_y: int,
+    transparent: set[int] | None = None,
+    direct: bool = True,
+) -> SpriteRgb555:
+    """Render a DS 8bpp tile grid (8x8 tiles) into an RGB555 sprite.
+
+    ``palette`` must hold 256 entries. ``transparent`` lists the palette
+    indices to leave as 0 (default: just index 0).
+    """
+    if len(palette) < 256:
+        raise FormatError(f"8bpp sprite needs a 256-color palette, got {len(palette)}")
+    if transparent is None:
+        transparent = {0}
+    width, height = tiles_x * 8, tiles_y * 8
+    buf = [0] * (width * height)
+    for ty in range(tiles_y):
+        for tx in range(tiles_x):
+            tile_id = ty * tiles_x + tx
+            for py in range(8):
+                y = ty * 8 + py
+                for px in range(8):
+                    x = tx * 8 + px
+                    ci = _sample_ncg_8bpp(ncg, tile_id, px, py)
+                    if ci in transparent or ci >= len(palette):
+                        continue
+                    raw = palette[ci]
+                    if direct:
+                        buf[y * width + x] = 0x8000 | (raw & 0x7FFF)
+                    else:
+                        buf[y * width + x] = raw & 0x7FFF
+    return SpriteRgb555(width=width, height=height, pixels=tuple(buf))
+
+
+def extract_nintendo_logo(fs: Filesystem) -> SpriteRgb555:
+    """Decode the real Nintendo boot logo (8bpp 128x16 NSC, red oval + wordmark).
+
+    The NSC is 8bpp, 128 wide x 16 tall. Index 0xF1 is the background
+    (transparent), 0x4C the red oval, and 77..255 the red-to-white gradient
+    that forms the "Nintendo" wordmark.
+    """
+    nsc = lz77_auto(fs.read(NINTENDO_LOGO_NSC_PATH))
+    width, height = 128, 16
+    if len(nsc) < width * height:
+        raise FormatError(f"Nintendo logo too small: {len(nsc)}")
+    pal = [0] * 256
+    pal[76] = 0x7C1F  # red oval (RGB555 r=31, g=0, b=0)
+    for i in range(77, 256):
+        v = i - 77
+        r = 31
+        g = min(31, v * 31 // 178)
+        b = min(31, v * 31 // 178)
+        pal[i] = (r & 31) | ((g & 31) << 5) | ((b & 31) << 10)
+    buf = [0] * (width * height)
+    for y in range(height):
+        for x in range(width):
+            v = nsc[y * width + x]
+            if v == 0xF1 or v == 0x00 or v >= len(pal):
+                continue
+            c = pal[v]
+            if c:
+                buf[y * width + x] = 0x8000 | (c & 0x7FFF)
+    return SpriteRgb555(width=width, height=height, pixels=tuple(buf))
+
+
+def extract_mario64ds_ipl_logo(fs: Filesystem) -> SpriteRgb555:
+    """Decode the real MARIO 64 DS IPL logo (8bpp 64x16 NCG + 16-color NCL)."""
+    ncg = lz77_auto(fs.read(MARIO64DS_IPL_NCG_PATH))
+    ncl16 = decode_ncl_palette16(fs.read(MARIO64DS_IPL_NCL_PATH), direct=False)
+    pal = [0] * 256
+    for i, c in enumerate(ncl16):
+        pal[i] = c
+    # The IPL art is 8bpp 8x8 tiles, 8 wide x 2 tall = 64x16.
+    return decode_8bpp_tile_sprite(ncg, tuple(pal), tiles_x=8, tiles_y=2, direct=True)

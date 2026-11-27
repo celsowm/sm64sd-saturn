@@ -1,4 +1,6 @@
+import math
 import os
+import re
 from pathlib import Path
 import sys
 import unittest
@@ -12,7 +14,9 @@ from sm64ds_pipeline.kcl import decode_kcl
 from sm64ds_pipeline.level_objects import (
     CASTLE_1F_OVERLAY_ID,
     CASTLE_GROUNDS_OVERLAY_ID,
+    castle_1f_wave_table,
     extract_castle_1f_objects,
+    extract_clps_masks,
     extract_clps_slippery_mask,
 )
 from sm64ds_pipeline.quad_merge import merge_coplanar_quads
@@ -22,6 +26,8 @@ from prepare_castle import (
     _compact_rooms,
     _compute_room_adjacency,
     _compute_room_portals,
+    _kcl_water_surface,
+    _merge_water_actors,
     _xz_near_polygon,
 )
 
@@ -62,6 +68,118 @@ class Castle1fPipelineTests(unittest.TestCase):
         )
         self.assertEqual(len(objs.toads), 4)
         self.assertEqual(objs.toad_rooms[0], 0)
+
+    def test_ripple_course_paintings_are_state0(self):
+        objs = extract_castle_1f_objects(self.fs)
+        ripples = [p for p in objs.paintings if p.state == 0]
+        self.assertEqual(len(ripples), 4)
+        # All four course paintings carry the same width nibble in param1.
+        self.assertEqual({p.param & 0xF for p in ripples}, {5})
+        for p in ripples:
+            self.assertGreater(p.width, 0)
+            self.assertGreater(p.height, 0)
+
+    def test_wave_table_rows_have_front_and_back_halves(self):
+        rows = castle_1f_wave_table(self.fs)
+        self.assertEqual(len(rows), 12)
+        self.assertTrue(all(len(r) == 5 for r in rows))
+        self.assertEqual({r[1] for r in rows[:6]}, {13107})
+        self.assertEqual({r[1] for r in rows[6:]}, {4369})
+        # Amplitude and wavelength are shared by both halves; the durations
+        # differ (60 frames in front, 100 behind).
+        self.assertEqual({r[0] for r in rows}, {rows[0][0]})
+        self.assertEqual({r[2] for r in rows}, {rows[0][2]})
+        for half in (rows[:6], rows[6:]):
+            self.assertEqual(len({r[4] for r in half}), 1)
+        self.assertEqual(rows[0][4], 60)
+        self.assertEqual(rows[6][4], 100)
+        for r in rows:
+            amplitude, phase_step, wavelength, radius, duration = r
+            self.assertGreater(amplitude, 0)
+            self.assertGreater(wavelength, 0)
+            self.assertGreater(radius, 0)
+            self.assertGreater(duration, 0)
+
+    def test_generated_ripple_arrays(self):
+        hdr = (ROOT / "private/castle_1f/castle_scene.h").read_text()
+        src = (ROOT / "private/castle_1f/castle_scene.c").read_text()
+        self.assertIn("#define CASTLE_RIPPLE_COUNT 4u", hdr)
+        self.assertIn("#define CASTLE_RIPPLE_GRID 8u", hdr)
+        self.assertIn("#define CASTLE_RIPPLE_CELLS (CASTLE_RIPPLE_GRID*CASTLE_RIPPLE_GRID)", hdr)
+        self.assertIn("#define CASTLE_RIPPLE_TILE_COUNT 256u", hdr)
+        self.assertGreater(int(re.search(r"#define CASTLE_PAINTING_TEXTURE_COUNT (\d+)u", hdr).group(1)), 200)
+        rows = re.search(r"const uint8_t castle_ripple_paintings\[CASTLE_RIPPLE_COUNT\]=\{(.*?)\};",
+                         src, re.S).group(1)
+        paints = [int(x) for x in re.findall(r"\d+", rows)]
+        self.assertEqual(len(paints), 4)
+        # Each ripple row owns a disjoint run of 64 tiles.
+        tiles = [int(x) for x in re.findall(r"\d+", re.search(
+            r"const uint16_t castle_ripple_tiles\[CASTLE_RIPPLE_TILE_COUNT\]=\{(.*?)\};", src, re.S).group(1))]
+        self.assertEqual(len(tiles), 256)
+        runs = [tiles[r * 64:(r + 1) * 64] for r in range(4)]
+        for run in runs:
+            self.assertEqual(len(run), 64)                # one tile per grid cell
+            self.assertLessEqual(len(set(run)), 64)
+        for a, b in ((0, 1), (1, 2), (2, 3)):
+            self.assertFalse(set(runs[a]) & set(runs[b]))
+        waves = [tuple(int(x) for x in re.findall(r"\d+", m)) for m in re.findall(
+            r"\{(\d+,\d+,\d+,\d+,\d+)\}", re.search(
+                r"const castle_ripple_wave_t castle_ripple_waves\[CASTLE_RIPPLE_COUNT\]=\{(.*?)\};", src, re.S).group(1))]
+        self.assertEqual(len(waves), 4)
+        for row in waves:
+            self.assertEqual(len(row), 5)
+            self.assertEqual(row[4], 60)                 # duration kept raw
+
+    def test_generated_wave_rows_match_rom_table_scaled(self):
+        src = (ROOT / "private/castle_1f/castle_scene.c").read_text()
+        waves = [tuple(int(x) for x in re.findall(r"\d+", m)) for m in re.findall(
+            r"\{(\d+,\d+,\d+,\d+,\d+)\}", re.search(
+                r"const castle_ripple_wave_t castle_ripple_waves\[CASTLE_RIPPLE_COUNT\]=\{(.*?)\};", src, re.S).group(1))]
+        rom_rows = castle_1f_wave_table(self.fs)
+        rom = rom_rows[3]            # width step 6 selects row 3 (see _ripple_wave_row)
+        self.assertEqual(len(set(waves)), 1)
+        gen = waves[0]
+        for field, rom_field in ((1, 1), (4, 4)):
+            self.assertEqual(gen[field], rom[rom_field])
+        for field in (0, 2, 3):
+            # 4.12 DS lengths are converted with *1.024.
+            self.assertAlmostEqual(gen[field] / 1.024, rom[field], delta=max(1, rom[field] * 0.02))
+
+    def test_ripple_height_math(self):
+        # Port of castle_ripple_height: the wavefront, the amplitude decay
+        # and the falloff are all integer fixed-point maths on the generated
+        # wave rows.
+        src = (ROOT / "private/castle_1f/castle_scene.c").read_text()
+        row = [tuple(int(x) for x in re.findall(r"\d+", m)) for m in re.findall(
+            r"\{(\d+,\d+,\d+,\d+,\d+)\}", re.search(
+                r"const castle_ripple_wave_t castle_ripple_waves\[CASTLE_RIPPLE_COUNT\]=\{(.*?)\};", src, re.S).group(1))][0]
+        amp, phase_step, wavelength, radius, duration = row
+
+        def height(dist, elapsed, phase=0):
+            frames = 65535 // phase_step
+            speed = wavelength // frames
+            if dist > speed * elapsed:
+                return 0
+            amp_v = amp - (amp // duration) * elapsed
+            fall = amp_v - (amp_v * dist) // radius
+            if fall < 0:
+                fall = 0
+            return int(round(math.sin(2 * math.pi * phase / 65536.0) * fall))
+
+        # A wave never begins with a zero timer.
+        self.assertEqual(height(0, 0), 0)
+        elapsed = 1
+        speed = wavelength // (65535 // phase_step)
+        # Beyond the wavefront the canvas is flat.
+        self.assertEqual(height(speed * elapsed + 1, elapsed), 0)
+        self.assertEqual(height(speed * elapsed + 1, 0), 0)
+        # Halfway through the run the origin cell is displaced; at the end the
+        # linear decay has reduced it.
+        half = duration // 2
+        h_half = height(0, half, phase=16384)
+        h_end = height(0, duration, phase=16384)
+        self.assertGreater(h_half, 0)
+        self.assertLess(abs(h_end), abs(h_half))
 
     def test_room_compaction_and_portal_adjacency(self):
         m = self.model
@@ -183,6 +301,72 @@ class Castle1fPipelineTests(unittest.TestCase):
             zs = [p[2] for p in pts]
             area += (max(xs) - min(xs)) * (max(zs) - min(zs))
         self.assertAlmostEqual(area, 9600.0, places=3)
+
+
+@unittest.skipUnless(ROM and ROM.is_file(), "set SM64DS_ROM to a local USA SM64DS ROM")
+class CastleGroundsWaterTests(unittest.TestCase):
+    def test_mc_water_actor_supplies_the_original_moat(self):
+        # Castle Grounds has no water in its stage KCL: the original moat is the
+        # MC_WATER actor (ov009), whose own KCL is a flat rectangle at y=-6.4.
+        fs = Filesystem.from_file(ROM)
+        prisms = decode_kcl(fs.read("data/stage/main_castle/main_castle.kcl"))
+        _slippery, water_mask = extract_clps_masks(fs, CASTLE_GROUNDS_OVERLAY_ID)
+        self.assertEqual(water_mask, 0)
+        merged, merged_mask = _merge_water_actors(fs, "main_castle", prisms, water_mask)
+        self.assertEqual(len(merged), len(prisms) + 2)
+        bits = [b for b in range(32) if merged_mask >> b & 1]
+        self.assertEqual(len(bits), 1)
+        self.assertEqual({p.attribute for p in merged[len(prisms):]}, set(bits))
+        y, triangles = _kcl_water_surface(merged, merged_mask)
+        self.assertAlmostEqual(y, -6.4)
+        self.assertEqual(len(triangles), 2)
+        xs = [v[0] for t in triangles for v in t]
+        zs = [v[2] for t in triangles for v in t]
+        self.assertAlmostEqual(min(xs), -448.0)
+        self.assertAlmostEqual(max(xs), 512.0)
+        self.assertAlmostEqual(min(zs), -320.0)
+        self.assertAlmostEqual(max(zs), 512.25, places=2)
+
+    def test_stage_without_mc_water_is_unchanged(self):
+        fs = Filesystem.from_file(ROM)
+        prisms = decode_kcl(fs.read("data/stage/main_garden/main_garden.kcl"))
+        _slippery, water_mask = extract_clps_masks(fs, 11)
+        merged, merged_mask = _merge_water_actors(fs, "main_garden", prisms, water_mask)
+        self.assertEqual(merged, prisms)
+        self.assertEqual(merged_mask, water_mask)
+
+    def test_mc_water_bta_scroll_is_diagonal_91_frames(self):
+        # The MC_WATER BTA (ov009 daObjMcWater_c) has 91 frames, scale 4096,
+        # rotation 0, and translates S and T together at 46/91 per frame.
+        from sm64ds_pipeline.bta import load_bta
+        from prepare_castle import MC_WATER_OVERLAY_ID, MC_WATER_BTA_OFFSET
+        fs = Filesystem.from_file(ROM)
+        anim = load_bta(fs, MC_WATER_OVERLAY_ID, MC_WATER_BTA_OFFSET)
+        self.assertEqual(len(anim.frames), 91)
+        scale_s, scale_t, rotation = anim.frames[0][:3]
+        self.assertEqual(scale_s, 4096)
+        self.assertEqual(scale_t, 4096)
+        self.assertEqual(rotation, 0)
+        # transS == transT every frame (diagonal), stepping by 46.
+        for f in anim.frames:
+            self.assertEqual(f[3], f[4])
+        self.assertEqual(anim.frames[0][3], 0)
+        self.assertEqual(anim.frames[1][3], 46)
+        self.assertEqual(anim.frames[-1][3], 4096)
+
+    def test_emit_water_texture_bakes_phase_ring(self):
+        # The generated castle exports the 32x32 LUT4 texture and a 16-entry
+        # phase ring whose frames carry the diagonal BTA scroll.
+        from prepare_castle import _emit_water_texture
+        fs = Filesystem.from_file(ROM)
+        header, _code, info = _emit_water_texture(fs)
+        self.assertTrue(any("CASTLE_WATER_TEXTURE_AVAILABLE 1" in l for l in header))
+        self.assertTrue(any("CASTLE_WATER_TEX_WIDTH 32u" in l for l in header))
+        self.assertTrue(any("CASTLE_WATER_TEX_HEIGHT 32u" in l for l in header))
+        self.assertEqual(info["texture_size"], [32, 32])
+        self.assertEqual(info["phases"], 16)
+        self.assertEqual(info["bta_frames"], 91)
+        self.assertEqual(info["bta_step"], [46, 46])
 
 
 class WaterLayerTests(unittest.TestCase):

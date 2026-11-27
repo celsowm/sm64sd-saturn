@@ -16,6 +16,8 @@ from tools.sm64ds_pipeline.bca import Animation
 from tools.sm64ds_pipeline.bmd import Model, convert_bmd
 from tools.sm64ds_pipeline.ds2d import (
     extract_cloud_atlas,
+    extract_mario64ds_ipl_logo,
+    extract_nintendo_logo,
     render_mario3d_banner,
     render_peach_letter_card,
 )
@@ -165,12 +167,16 @@ def _emit_2d_assets(fs: Filesystem, out: Path) -> dict:
         height=168,
     )
     clouds = extract_cloud_atlas(fs)
+    nintendo_logo = extract_nintendo_logo(fs)
+    mario64ds_logo = extract_mario64ds_ipl_logo(fs)
 
     sprites = [
         ("intro_banner_title", title_spr),
         ("intro_banner_nintendo", nint_spr),
         ("intro_banner_start", start_spr),
         ("intro_peach_letter_card", letter_spr),
+        ("intro_logo_nintendo", nintendo_logo),
+        ("intro_logo_mario64ds", mario64ds_logo),
     ]
     shared_palette, indexed_pixels = _quantize_sprites_indexed8(sprites)
 
@@ -368,6 +374,23 @@ def prepare_intro(rom: Path, out: Path) -> dict:
     (out / "mario_face.h").write_text(h, encoding="ascii")
     (out / "mario_face.c").write_text(c, encoding="ascii")
 
+    # 1b. 3D Yoshi Face Demo companion (18 rigid bones + idle wait loop).
+    # The original title screen shows Mario and Yoshi side by side.
+    yoshi = convert_bmd(fs.read("data/DSMT/face_demo_yoshi.bmd"))
+    yoshi_wait = Animation(fs.read("data/DSMT/face_demo_wait_yoshi.bca"), len(yoshi.bones))
+    h, c, yf_stats = emit_model(
+        yoshi,
+        [("wait", yoshi_wait)],
+        "yoshi_face",
+        textured=True,
+        tile_size=16,
+        texture_budget=96 * 1024,
+        lut4=True,
+        adaptive_size=True,
+    )
+    (out / "yoshi_face.h").write_text(h, encoding="ascii")
+    (out / "yoshi_face.c").write_text(c, encoding="ascii")
+
     # 2. 3D Power Star (spherical UV projection for golden metallic sheen + opening flight)
     star_model = _project_star_uvs(convert_bmd(fs.read("data/DSMT/face_demo_mariostar.bmd")))
     star_anim = Animation(fs.read("data/DSMT/opening_star_short.bca"), len(star_model.bones))
@@ -413,6 +436,12 @@ def prepare_intro(rom: Path, out: Path) -> dict:
             "faces": len(mario_face.faces),
             "bones": len(mario_face.bones),
             "tex_bytes": mf_stats["texture_pixels_bytes"],
+        },
+        "yoshi_face": {
+            "verts": len(yoshi.vertices),
+            "faces": len(yoshi.faces),
+            "bones": len(yoshi.bones),
+            "tex_bytes": yf_stats["texture_pixels_bytes"],
         },
         "intro_star": {
             "verts": len(star_model.vertices),

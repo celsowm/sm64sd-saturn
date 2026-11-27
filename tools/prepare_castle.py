@@ -4,13 +4,14 @@ import argparse
 from collections import Counter
 import json
 import math
+import struct
 from pathlib import Path
 from sm64ds_pipeline.filesystem import Filesystem
 from sm64ds_pipeline.bca import Animation
 from sm64ds_pipeline.bmd import convert_bmd
 from sm64ds_pipeline.cli import main as convert
 from sm64ds_pipeline.emit import emit_model
-from sm64ds_pipeline.kcl import decode_kcl
+from sm64ds_pipeline.kcl import Prism, decode_kcl
 from sm64ds_pipeline.actor_model import bake_actor
 from sm64ds_pipeline.level import actor_placements, level_props, read_level, stage_overlay
 from actor_registry import ACTORS
@@ -30,6 +31,7 @@ from sm64ds_pipeline.level_objects import (
     CASTLE_1F_OVERLAY_ID,
     DS_TO_SATURN_SCALE,
     CASTLE_GROUNDS_OVERLAY_ID,
+    castle_1f_wave_table,
     extract_castle_1f_objects,
     extract_clps_masks,
 )
@@ -44,6 +46,24 @@ def fx(value):
 
 def vec(value):
     return '{' + ','.join(str(fx(v)) for v in value) + '}'
+
+
+RIPPLE_GRID = 8  # 8x8 tile grid per rippling painting (VDP1 sub-textures)
+
+
+def _ds412_to_fx16(value: int) -> int:
+    """DS 4.12 length -> Saturn 16.16: /4096 * 0.064 * 65536 = *1.024."""
+    return int(round(value * 1.024))
+
+
+def _ripple_wave_row(param: int) -> int:
+    """Front WaveParams row for a picture-gate param's width nibble."""
+    size = (param & 0xF) + 1
+    try:
+        return {3: 0, 4: 1, 5: 2, 6: 3, 7: 4, 8: 5, 16: 5}[size]
+    except KeyError as exc:
+        raise ValueError(f'no picture-gate wave row for width step {size}') from exc
+
 
 
 def aabb_literal(lo, hi):
@@ -218,6 +238,9 @@ def _stage_warps(stage, stage_entrance, warp_target, c1f_objs, fx, spawn_yaw=Non
     """
     if stage == 'castle_1f':
         spawn = (fx(-64.0), fx(64.0), fx(24.0), 0, 180)
+        if stage_entrance is not None:  # --spawn test override (x, z, floor Y, yaw)
+            ex, ey, ez, eyaw = stage_entrance
+            spawn = (fx(ex), fx(ez), fx(ey + 512.0), eyaw, (eyaw + 180) % 360)
         entrances = [spawn, spawn, spawn]
         warps = [((fx(-78.0), fx(-4.0), fx(124.0), fx(-50.0), fx(18.0), fx(144.0)),
                   warp_target or '0.BIN', 1, 0)]
@@ -253,10 +276,13 @@ def _build_castle_1f_props(fs: Filesystem):
     """Extract Castle 1F course paintings, exit doors, and Toads as compact LUT4 assets."""
     objs = extract_castle_1f_objects(fs)
 
-    # 1. Course paintings (each is 1 quad + 1 crisp 64x64 LUT4 texture).
+    # 1. Course paintings. Each unique picture gets one crisp 64x64 LUT4 flat
+    # texture, plus (for the proximity-ripple state row) an 8x8 grid of 16x16
+    # LUT4 tiles sharing that picture's palette. VDP1 cannot sample arbitrary
+    # per-vertex UVs, so the wave mesh draws one textured quad per tile.
     unique_paths = []
     path_to_idx = {}
-    painting_bakes = []
+    sources = {}
     for p in objs.paintings:
         if p.model_path not in path_to_idx:
             path_to_idx[p.model_path] = len(unique_paths)
@@ -267,10 +293,40 @@ def _build_castle_1f_props(fs: Filesystem):
                 raise ValueError(f'{p.model_path} is missing its texture')
             uv = ((0.0, 0.0), (float(ptex.width), 0.0),
                   (float(ptex.width), float(ptex.height)), (0.0, float(ptex.height)))
-            painting_bakes.append(bake_face(ptex, uv, 64, samples=2))
-    ptexs, pluts, plut_cnt, _ = index_bakes_lut4(
-        painting_bakes, groups=list(range(len(painting_bakes)))
-    )
+            sources[p.model_path] = (ptex, bake_face(ptex, uv, 64, samples=2))
+
+    ripple_paths = {p.model_path for p in objs.paintings if p.state == 0}
+    for path in ripple_paths:
+        ptex = sources[path][0]
+        if ptex.width % RIPPLE_GRID or ptex.height % RIPPLE_GRID:
+            raise ValueError(f'{path} texture {ptex.width}x{ptex.height} does not split into {RIPPLE_GRID} tiles')
+        tile_w, tile_h = ptex.width // RIPPLE_GRID, ptex.height // RIPPLE_GRID
+        if tile_w != tile_h or tile_w % 8:
+            raise ValueError(f'{path} ripple tiles are {tile_w}x{tile_h}; VDP1 needs square multiples of 8')
+
+    bakes = []
+    groups = []
+    flat_face = {}
+    tile_face_start = {}
+    for path in unique_paths:
+        model_idx = path_to_idx[path]
+        flat_face[path] = len(bakes)
+        bakes.append(sources[path][1])
+        groups.append(model_idx)
+        if path in ripple_paths:
+            ptex = sources[path][0]
+            tile_w, tile_h = ptex.width // RIPPLE_GRID, ptex.height // RIPPLE_GRID
+            tile_face_start[path] = len(bakes)
+            for gy in range(RIPPLE_GRID):
+                for gx in range(RIPPLE_GRID):
+                    x0, y0 = gx * tile_w, gy * tile_h
+                    x1, y1 = x0 + tile_w, y0 + tile_h
+                    uv = ((float(x0), float(y0)), (float(x1), float(y0)),
+                          (float(x1), float(y1)), (float(x0), float(y1)))
+                    bakes.append(bake_face(ptex, uv, tile_w, samples=2))
+                    groups.append(model_idx)
+
+    ptexs, pluts, plut_cnt, bake_faces = index_bakes_lut4(bakes, groups=groups)
     painting_bytes = plut_cnt * 32 + sum(len(t.pixels) for t in ptexs)
 
     # Precompute world-space quad corners (TL, TR, BR, BL) facing +normal into the room.
@@ -292,10 +348,38 @@ def _build_castle_1f_props(fs: Filesystem):
         tr = (cx + rx * hw, y_top, cz + rz * hw)
         br = (cx + rx * hw, y_bot, cz + rz * hw)
         bl = (cx - rx * hw, y_bot, cz - rz * hw)
-        painting_quads.append((tl, tr, br, bl, path_to_idx[p.model_path], p.room))
+        painting_quads.append((tl, tr, br, bl, bake_faces[flat_face[p.model_path]], p.room))
+
+    # Proximity-ripple placements: state row 0 paintings draw their wave mesh
+    # from the shared tile grid; the front WaveParams row is picked by width.
+    wave_rows = castle_1f_wave_table(fs)
+    ripple_paintings = []
+    ripple_tiles = []
+    ripple_waves = []
+    for i, p in enumerate(objs.paintings):
+        if p.state != 0:
+            continue
+        if p.model_path not in tile_face_start:
+            raise ValueError(f'{p.model_path} has no ripple tiles')
+        row = _ripple_wave_row(p.param)
+        amp, phase_step, wavelength, radius, duration = wave_rows[row]
+        ripple_paintings.append(i)
+        start = tile_face_start[p.model_path]
+        ripple_tiles.extend(bake_faces[start:start + RIPPLE_GRID * RIPPLE_GRID])
+        ripple_waves.append((
+            _ds412_to_fx16(amp),
+            phase_step,
+            _ds412_to_fx16(wavelength),
+            _ds412_to_fx16(radius),
+            duration,
+        ))
+    ripple_bytes = sum(len(ptexs[j].pixels) for j in set(ripple_tiles))
 
     # 2. Level-exit 3D doors (obj_door1.bmd at 0.5x actor scale).
     exit_doors = [d for d in objs.doors if d.is_level_exit]
+    # Internal room doors: the DS door actor carries Mario through the closed
+    # wall in its doorway, so the runtime needs each hinge position and yaw.
+    pass_doors = [d for d in objs.doors if not d.is_level_exit]
     door_bmd = convert_bmd(fs.read('data/normal_obj/door/obj_door1.bmd'))
     dverts = [tuple(c * (1 << door_bmd.scale_shift) * 0.5 / 4096.0 for c in (v.x, v.y, v.z))
               for v in door_bmd.vertices]
@@ -337,7 +421,18 @@ def _build_castle_1f_props(fs: Filesystem):
         'extern const sat_quad3_t castle_painting_quads[CASTLE_PAINTING_COUNT];',
         'extern const uint8_t castle_painting_tex_indices[CASTLE_PAINTING_COUNT];',
         'extern const uint8_t castle_painting_rooms[CASTLE_PAINTING_COUNT];',
+        f'#define CASTLE_RIPPLE_COUNT {len(ripple_paintings)}u',
+        f'#define CASTLE_RIPPLE_GRID {RIPPLE_GRID}u',
+        '#define CASTLE_RIPPLE_CELLS (CASTLE_RIPPLE_GRID*CASTLE_RIPPLE_GRID)',
+        f'#define CASTLE_RIPPLE_TILE_COUNT {len(ripple_tiles)}u',
+        'typedef struct castle_ripple_wave {',
+        '    int32_t amplitude, phase_step, wavelength, radius;',
+        '    uint16_t duration;',
+        '} castle_ripple_wave_t;',
         f'#define CASTLE_DOOR_COUNT {len(exit_doors)}u',
+        *([f'#define CASTLE_PASS_DOOR_COUNT {len(pass_doors)}u',
+           'extern const sat_vec3_t castle_pass_door_positions[CASTLE_PASS_DOOR_COUNT];',
+           'extern const int16_t castle_pass_door_yaw_deg[CASTLE_PASS_DOOR_COUNT];'] if pass_doors else []),
         f'#define CASTLE_DOOR_VERTEX_COUNT {len(dverts)}u',
         f'#define CASTLE_DOOR_FACE_COUNT {len(dfaces)}u',
         f'#define CASTLE_DOOR_TEXTURE_COUNT {len(dtexs)}u',
@@ -354,6 +449,23 @@ def _build_castle_1f_props(fs: Filesystem):
         'extern const int16_t castle_toad_yaw_deg[CASTLE_TOAD_COUNT];',
         'extern const uint8_t castle_toad_rooms[CASTLE_TOAD_COUNT];',
     ]
+    if ripple_paintings:
+        h_lines += [
+            'extern const uint8_t castle_ripple_paintings[CASTLE_RIPPLE_COUNT];',
+            'extern const uint16_t castle_ripple_tiles[CASTLE_RIPPLE_TILE_COUNT];',
+            'extern const castle_ripple_wave_t castle_ripple_waves[CASTLE_RIPPLE_COUNT];',
+        ]
+
+    ripple_c = []
+    if ripple_paintings:
+        ripple_c = [
+            'const uint8_t castle_ripple_paintings[CASTLE_RIPPLE_COUNT]={',
+            array(ripple_paintings), '};',
+            'const uint16_t castle_ripple_tiles[CASTLE_RIPPLE_TILE_COUNT]={',
+            array(ripple_tiles), '};',
+            'const castle_ripple_wave_t castle_ripple_waves[CASTLE_RIPPLE_COUNT]={',
+            ',\n'.join('{' + ','.join(str(v) for v in w) + '}' for w in ripple_waves), '};',
+        ]
 
     c_lines = [
         'static const sat_vec3_t painting_dummy_verts[4]={{0,0,0},{65536,0,0},{65536,65536,0},{0,65536,0}};',
@@ -385,6 +497,7 @@ def _build_castle_1f_props(fs: Filesystem):
         array([q[4] for q in painting_quads]), '};',
         'const uint8_t castle_painting_rooms[CASTLE_PAINTING_COUNT]={',
         array([q[5] for q in painting_quads]), '};',
+        *ripple_c,
         'static const sat_vec3_t door_vertices[]={',
         ',\n'.join(vec(v) for v in dverts),
         '};',
@@ -415,6 +528,10 @@ def _build_castle_1f_props(fs: Filesystem):
         array([d.yaw_deg for d in exit_doors]), '};',
         'const uint8_t castle_door_rooms[CASTLE_DOOR_COUNT]={',
         array([d.in_area for d in exit_doors]), '};',
+        *(['const sat_vec3_t castle_pass_door_positions[CASTLE_PASS_DOOR_COUNT]={',
+           ',\n'.join(vec(d.position) for d in pass_doors), '};',
+           'const int16_t castle_pass_door_yaw_deg[CASTLE_PASS_DOOR_COUNT]={',
+           array([d.yaw_deg for d in pass_doors]), '};'] if pass_doors else []),
         'static const sat_vec3_t toad_vertices[]={',
         ',\n'.join(vec(v) for v in tverts),
         '};',
@@ -449,6 +566,9 @@ def _build_castle_1f_props(fs: Filesystem):
     return h_lines, c_lines, objs, {
         'castle_painting_count': len(painting_quads),
         'castle_painting_texture_bytes': painting_bytes,
+        'castle_ripple_count': len(ripple_paintings),
+        'castle_ripple_tile_count': len(ripple_tiles),
+        'castle_ripple_texture_bytes': ripple_bytes,
         'castle_door_count': len(exit_doors),
         'castle_door_texture_bytes': door_bytes,
         'castle_toad_count': len(objs.toads),
@@ -488,6 +608,168 @@ def _kcl_water_surface(prisms, water_mask):
         return None, ()
     y = max(areas, key=areas.get)
     return y, triangles[y]
+
+
+# Some stages model their water as a placed actor with its own KCL instead of
+# as stage collision. Castle Grounds is the first: the original moat is the
+# MC_WATER actor (ov009 daObjMcWater_c), whose KCL is a flat rectangle at the
+# actor's local y=-6.4, wide enough to cover the whole map. Its prisms are
+# merged into the stage collision under a free CLPS index marked as water, so
+# the existing swim, tint and water-plane code sees exactly the original
+# surface.
+WATER_ACTOR_KCL = {'MC_WATER': 'data/special_obj/mc_water/mc_water.kcl'}
+
+
+def _transform_water_prism(prism, position, yaw_deg, attribute):
+    """Move/rotate an actor-local KCL prism into stage space."""
+    px, py, pz = position
+    if yaw_deg % 360 == 0:
+        def point(v):
+            return (v[0] + px, v[1] + py, v[2] + pz)
+        def direction(v):
+            return v
+    else:
+        a = math.radians(yaw_deg)
+        c, s = math.cos(a), math.sin(a)
+        def point(v):
+            return (v[0] * c - v[2] * s + px, v[1] + py, v[0] * s + v[2] * c + pz)
+        def direction(v):
+            return (v[0] * c - v[2] * s, v[1], v[0] * s + v[2] * c)
+    return Prism(tuple(point(v) for v in prism.vertices), direction(prism.normal),
+                 tuple(direction(e) for e in prism.edges), prism.extent, attribute)
+
+
+def _merge_water_actors(fs: Filesystem, stage: str, prisms, water_mask, star=1):
+    """Append placed MC_WATER-style actor collision to a stage's prisms.
+
+    Returns (prisms, water_mask). A stage without such actors is unchanged.
+    The first free CLPS attribute below 32 is reserved for the actor water so
+    its attribute 0 prism does not turn every stage attribute-0 floor into
+    water.
+    """
+    placements = actor_placements(fs, stage, list(WATER_ACTOR_KCL), star=star)
+    if not any(placements.values()):
+        return prisms, water_mask
+    used = {p.attribute for p in prisms if p.attribute < 32}
+    attribute = next((i for i in range(32) if i not in used), None)
+    if attribute is None:
+        raise ValueError(f'{stage}: no free CLPS attribute for actor water')
+    merged = list(prisms)
+    for actor, kcl_path in WATER_ACTOR_KCL.items():
+        actor_prisms = decode_kcl(fs.read(kcl_path))
+        for x, y, z, yaw in placements.get(actor, ()):
+            merged.extend(_transform_water_prism(p, (x, y, z), yaw, attribute)
+                          for p in actor_prisms)
+    return merged, water_mask | (1 << attribute)
+
+
+# The original MC_WATER surface is animated by a BTA file (dExtAnmTexSRT_c):
+# its single material's texture-SRT translation advances every frame, so the
+# 32x32 repeat water texture scrolls diagonally. daObjMcWater_c lives in
+# overlay 9 (ov009). The decomp names the BTA data_ov009_02112bc4, but that is
+# a build-space address; in the retail overlay the BTA begins at file offset
+# 0x1a24 (verified by the 91-frame header and the 0x2107854-family pointers).
+MC_WATER_OVERLAY_ID = 9
+MC_WATER_BTA_OFFSET = 0x1A24
+MC_WATER_BMD = 'data/special_obj/mc_water/mc_water.bmd'
+# Number of phase-shifted LUT4 textures baked for the diagonal scroll. The
+# renderer walks this ring at the BTA's per-frame step.
+WATER_PHASES = 16
+
+
+def _emit_water_texture(fs: Filesystem):
+    """Bake the original MC_WATER texture and its BTA scroll as C arrays.
+
+    Returns (header_lines, code_lines, info) where info drives the generated
+    CASTLE_WATER_* defines. The texture is the model's only material texture,
+    quantized to VDP1 LUT4 exactly like the rest of the castle; the scroll is
+    the BTA's per-frame (transS, transT) pair, which the runtime adds to the
+    texture matrix every frame.
+
+    Because the Saturn's scene3d quad path always maps a whole texture to a
+    quad (no per-quad UV sub-rect), the diagonal scroll is baked into a small
+    ring of phase-shifted LUT4 textures. The renderer walks the ring one entry
+    per frame, exactly reproducing the DS texture-matrix translation while
+    staying inside the lib-saturn quad API.
+    """
+    from sm64ds_pipeline.bta import load_bta
+
+    bmd = convert_bmd(fs.read(MC_WATER_BMD))
+    tex = next((t for t in bmd.material_textures if t is not None), None)
+    if tex is None:
+        raise ValueError('mc_water.bmd has no texture')
+    baked, luts, lut_count, _ = index_bakes_lut4([BakedTexture(tex.width, tex.height, tex.pixels)],
+                                                  groups=[0])
+    lut4 = baked[0]
+
+    anim = load_bta(fs, MC_WATER_OVERLAY_ID, MC_WATER_BTA_OFFSET)
+    # The five animated slots are scaleS, scaleT, rotation, transS, transT.
+    # Castle water holds scale/rotation fixed and scrolls translation.
+    trans = [(f[3], f[4]) for f in anim.frames]
+    scale_s, scale_t, rotation = anim.frames[0][:3]
+    step_s = trans[1][0] - trans[0][0] if len(trans) > 1 else 0
+    step_t = trans[1][1] - trans[0][1] if len(trans) > 1 else 0
+
+    # Bake one ring of phase-shifted copies of the LUT4 texture. Phase p shows
+    # the source shifted diagonally by round(p * tex / WATER_PHASES) texels,
+    # wrapping at the texture edge (the source repeats). The renderer cycles
+    # the ring at the BTA's per-frame step so the surface scrolls diagonally.
+    phases = WATER_PHASES
+    tw, th = tex.width, tex.height
+    src = tex.pixels
+    phase_pixels = []
+    for p in range(phases):
+        # Shift each destination texel back along the (1,1) diagonal by p tiles.
+        shift = (p * tw) // phases
+        rows = []
+        for y in range(th):
+            for x in range(tw):
+                sx = (x - shift) % tw
+                sy = (y - shift) % th
+                rows.append(src[sy * tw + sx])
+        phase_pixels.append(BakedTexture(tw, th, tuple(rows)))
+    phase_baked, phase_luts, phase_lut_count, _ = index_bakes_lut4(phase_pixels, groups=[0] * phases)
+
+    header = [
+        '#define CASTLE_WATER_TEXTURE_AVAILABLE 1',
+        f'#define CASTLE_WATER_TEX_WIDTH {lut4.width}u',
+        f'#define CASTLE_WATER_TEX_HEIGHT {lut4.height}u',
+        f'#define CASTLE_WATER_TEX_LUT {lut_count}u',
+        f'#define CASTLE_WATER_TEX_FRAMES {len(anim.frames)}u',
+        f'#define CASTLE_WATER_TEX_SCALE_S {scale_s}u',
+        f'#define CASTLE_WATER_TEX_SCALE_T {scale_t}u',
+        f'#define CASTLE_WATER_TEX_ROTATION {rotation}u',
+        f'#define CASTLE_WATER_TEX_STEP_S {step_s}u',
+        f'#define CASTLE_WATER_TEX_STEP_T {step_t}u',
+        f'#define CASTLE_WATER_TEX_PHASES {phases}u',
+        f'#define CASTLE_WATER_TEX_PHASE_LUT {phase_lut_count}u',
+        'extern const uint8_t castle_water_pixels[CASTLE_WATER_TEX_PHASES][CASTLE_WATER_TEX_WIDTH * CASTLE_WATER_TEX_HEIGHT / 2];',
+        'extern const uint16_t castle_water_lut[CASTLE_WATER_TEX_PHASE_LUT * 16];',
+    ]
+    code = [
+        '/* Original MC_WATER (ov009 daObjMcWater_c) texture and BTA scroll. */',
+        'const uint8_t castle_water_pixels[CASTLE_WATER_TEX_PHASES]'
+        '[CASTLE_WATER_TEX_WIDTH * CASTLE_WATER_TEX_HEIGHT / 2]={',
+    ]
+    for p in range(phases):
+        code.append('{')
+        code.append(array(phase_baked[p].pixels))
+        code.append('},')
+    code.append('};')
+    code += ['const uint16_t castle_water_lut[CASTLE_WATER_TEX_PHASE_LUT * 16]={',
+             hex_array(phase_luts), '};']
+    info = {
+        'texture_size': [lut4.width, lut4.height],
+        'lut_count': lut_count,
+        'phases': phases,
+        'bta_frames': len(anim.frames),
+        'bta_scale': [scale_s, scale_t],
+        'bta_rotation': rotation,
+        'bta_step': [step_s, step_t],
+        'bta_trans_first': list(trans[0]),
+        'bta_trans_last': list(trans[-1]),
+    }
+    return header, code, info
 
 
 def _compact_rooms(vertices, faces, uvs, materials, origins, source_sets, face_rooms, colors, room_count):
@@ -651,12 +933,15 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             pack_split_quads=False, vertex_colors=False, merge_quads=False, lut4=False,
             max_edge=0.0, max_edge_radius=0.0, max_tile_size=48, stage='main_castle',
             chunk_size=0.0, warp_target='', with_intro_props=False, actors=None, spawn=None,
-            water_layers=False, spawn_yaw=None):
+            water_layers=False, spawn_yaw=None, manual_water_y=None,
+            manual_water_region=None):
     if stage not in ('main_castle', 'castle_1f', 'bombhei_map', 'main_garden', 'battan_king_map',
                      'kaizoku_irie'):
         raise ValueError(f'unsupported stage: {stage}')
     is_interior = (stage == 'castle_1f')
     stage_entrance = stage_bin = None
+    if spawn and is_interior:   # test builds: x z y in Saturn units
+        stage_entrance = (spawn[0], spawn[2], spawn[1], (spawn_yaw or 0) % 360)
     sky_model = 'data/vrbox/vr02.bmd'
     if stage not in ('main_castle', 'castle_1f'):
         lv = read_level(Filesystem.from_file(rom), stage)
@@ -788,6 +1073,8 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
     water_y = None
     water_cut = 0
     water_plane_bounds = None
+    if water_layers and not is_interior and manual_water_y is None:
+        prisms, water_mask = _merge_water_actors(fs, stage, prisms, water_mask)
     if water_layers and not is_interior:
         # The main water surface is the height with the most water area. With the
         # camera above it, no face wholly below it can be in front of one that
@@ -807,12 +1094,24 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
             if is_water(f, mat):
                 areas[round(vertices[f[0]][1], 3)] += _face_area(vertices, f)
         water_y, water_triangles = _kcl_water_surface(prisms, water_mask)
+        if manual_water_y is not None:
+            water_y = manual_water_y
+            water_triangles = []
+            if manual_water_region is not None:
+                x0, x1, z0, z1 = manual_water_region
+                surface = [[(x0, z0), (x1, z0), (x1, z1), (x0, z1)]]
+                water_plane_bounds = (x0, x1, z0, z1)
+            else:
+                surface = []
+        else:
+            surface = None
         if water_y is None and areas:
             water_y = max(areas, key=areas.get)
         if water_y is not None:
-            surface = [[(vertices[i][0], vertices[i][2]) for i in (f[:3] if f[2] == f[3] else f)]
-                       for f, mat in zip(faces, materials)
-                       if is_water(f, mat) and abs(vertices[f[0]][1] - water_y) < 1e-3]
+            if surface is None:
+                surface = [[(vertices[i][0], vertices[i][2]) for i in (f[:3] if f[2] == f[3] else f)]
+                           for f, mat in zip(faces, materials)
+                           if is_water(f, mat) and abs(vertices[f[0]][1] - water_y) < 1e-3]
             if not surface and water_triangles:
                 surface = [[(v[0], v[2]) for v in t] for t in water_triangles]
                 xs, zs = zip(*(v for t in surface for v in t))
@@ -1201,6 +1500,14 @@ def prepare(rom: Path, out: Path, tile_size=16, split_edge=0, sdk_split=0,
                 header += ['#define CASTLE_WATER_PLANE 1']
                 for axis, bound in zip(('X0', 'X1', 'Z0', 'Z1'), water_plane_bounds):
                     header += [f'#define CASTLE_WATER_REGION_{axis} {fx(bound)}']
+                # The original MC_WATER texture and its BTA scroll, emitted only
+                # when this stage actually places the MC_WATER actor.
+                if any(placements.get('MC_WATER') for placements in
+                       [actor_placements(fs, stage, list(WATER_ACTOR_KCL), star=1)]):
+                    wheader, wcode, winfo = _emit_water_texture(fs)
+                    header += wheader
+                    code += wcode
+                    props_report['castle_water_texture'] = winfo
             code += ['/* 0 below the water surface, 1 the water, 2 above it. */',
                      'const uint8_t castle_chunk_layer[CASTLE_CHUNK_COUNT]={',
                      array([water_layer(faces[f], materials[f]) for f in chunk_first]), '};', '']
@@ -1395,6 +1702,9 @@ if __name__ == '__main__':
     p.add_argument('--split-radius', type=float, default=96, help='XZ radius around spawn for SDK split')
     p.add_argument('--max-edge', type=float, default=0, help='Subdivide oversized faces exceeding this edge length in world units')
     p.add_argument('--water-layers', action='store_true', help='Chunk the level into below/water/above layers of the main water surface, drawn far side first (needs --chunk-size)')
+    p.add_argument('--water-y', type=float, help='Explicit visual water height in Saturn world units')
+    p.add_argument('--water-region', type=float, nargs=4, metavar=('X0', 'X1', 'Z0', 'Z1'),
+                   help='Explicit rectangular visual water region (requires --water-y)')
     p.add_argument('--max-edge-radius', type=float, default=0, help='Optional XZ radius around spawn for --max-edge (0 = whole castle)')
     p.add_argument('--refine-face', type=int, action='append', default=[], help='Source face ID to split on the finer grid; repeatable')
     p.add_argument('--refine-manifest', type=Path, help='Validated source faces to refine')
@@ -1428,4 +1738,4 @@ if __name__ == '__main__':
             a.refine_face, a.refine_grid, a.refine_manifest, a.adaptive_priorities, a.stitch_source, a.stitch_cross_source,
             a.pack_split_quads, a.vertex_colors, a.merge_quads, a.lut4, a.max_edge, a.max_edge_radius, a.max_tile_size,
             a.stage, a.chunk_size, a.warp_target, a.with_intro_props, a.actors, a.spawn,
-            a.water_layers, a.spawn_yaw)
+            a.water_layers, a.spawn_yaw, a.water_y, a.water_region)

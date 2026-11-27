@@ -279,6 +279,7 @@ if(SM64DS_BUILD_CASTLE)
       runtime/sm64ds_pose.c
       runtime/sm64ds_background.c
       "${SM64DS_INTRO_DIR}/mario_face.c"
+      "${SM64DS_INTRO_DIR}/yoshi_face.c"
       "${SM64DS_INTRO_DIR}/intro_star.c"
       "${SM64DS_INTRO_DIR}/peach_actor.c"
       "${SM64DS_INTRO_DIR}/intro_2d.c"

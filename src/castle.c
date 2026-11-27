@@ -3,6 +3,7 @@
 #include <saturn/input.h>
 #include <saturn/scene.h>
 #include <saturn/skin3d.h>
+#include <saturn/math2d.h>
 #include <saturn/color.h>
 #include <saturn/font.h>
 #include <saturn/vdp1.h>
@@ -305,6 +306,7 @@ static sat_cd_device_t cd_device;
 static sat_cdfs_volume_t cd_volume;
 static uint8_t warp_fade=0;
 static const sm64ds_warp_t *warp_target=0;
+static sm64ds_loading_t warp_loading;
 #endif
 #if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
 #define LN LAKITU_ACTOR_VERTEX_COUNT
@@ -573,12 +575,60 @@ static void update_water_tint(void) {
 #ifdef CASTLE_WATER_PLANE
 /* Build and submit the camera-centred water plane. Call after the terrain
  * chunks, before the actors, at the water pass. */
-enum { WATER_PLANE_CELLS=4, WATER_PLANE_RINGS=4 };
-static void draw_water_plane(uint16_t pass) {
-    static sat_water_plane_t water_plane;
-    static const sat_scene3d_material_t material={
-        .kind=SAT_SCENE3D_RGB,.rgb555=SAT_RGB555(9,23,28),
+/* The moat and pond span the whole grounds (about 960 x 832 units), so the
+ * rings must reach far enough that the water is visible from the lawn: a
+ * 16-unit cell with four rings covers +-512 units around the camera. */
+enum { WATER_PLANE_CELLS=8, WATER_PLANE_RINGS=4 };
+/* Textured water grid: the original MC_WATER texture is a 32x32 repeat tile
+ * scrolled diagonally by its BTA. Saturn's scene3d quad path maps a whole
+ * texture per quad, so the scroll is baked into a ring of phase textures and
+ * the grid walks the ring one entry per frame. */
+#ifndef CASTLE_WATER_TEXTURE_AVAILABLE
+#define CASTLE_WATER_TEXTURE_AVAILABLE 0
+#endif
+#if CASTLE_WATER_TEXTURE_AVAILABLE
+static sat_scene3d_material_t water_material;
+static sat_vdp1_texture_t water_tex_uploaded[CASTLE_WATER_TEX_PHASES];
+static uint16_t water_lut_uploaded[16];
+static void water_texture_init(void) {
+    /* Upload one LUT and every phase's LUT4 pixels. The castle water LUT has
+     * the VDP1 RGB bit set per entry by index_bakes_lut4. */
+    SAT_PANIC_IF_ERROR(sat_vdp1_upload_lut(castle_water_lut, &water_lut_uploaded[0]));
+    for (uint32_t p = 0; p < CASTLE_WATER_TEX_PHASES; ++p) {
+        sat_vdp1_texture_t tex;
+        SAT_PANIC_IF_ERROR(sat_tex_upload_lut4_pixels(&tex, castle_water_pixels[p],
+            CASTLE_WATER_TEX_WIDTH, CASTLE_WATER_TEX_HEIGHT, water_lut_uploaded[0]));
+        water_tex_uploaded[p] = tex;
+    }
+    water_material = (sat_scene3d_material_t){
+        .kind = SAT_SCENE3D_INDEXED_TEXTURED,
+        .rgb555 = SAT_RGB555(5,16,26),
+        .texture = &water_tex_uploaded[0],
+        .color_calc_slot = SAT_INDEXED_SOLID_OPAQUE,
+        .sprite_flags = 0,
+    };
+}
+/* The BTA scrolls transS 0..4096 over 91 frames (one full tile); the ring has
+ * CASTLE_WATER_TEX_PHASES phases per tile, so advance that many phases per
+ * frame's 46/4096-of-a-tile step. */
+static void water_texture_pick(uint32_t ticks) {
+    const uint32_t phase = ((ticks * CASTLE_WATER_TEX_STEP_S) >> 8) % CASTLE_WATER_TEX_PHASES;
+    water_material.texture = &water_tex_uploaded[phase];
+}
+#else
+static sat_scene3d_material_t water_material;
+static void water_texture_init(void) {
+    water_material = (sat_scene3d_material_t){
+        .kind=SAT_SCENE3D_RGB,.rgb555=SAT_RGB555(5,16,26),
         .color_calc_slot=SAT_INDEXED_SOLID_OPAQUE,.sprite_flags=SAT_SPRITE_FLAG_MESH};
+}
+static void water_texture_pick(uint32_t ticks) { (void)ticks; }
+#endif
+/* Draw the water as lib-saturn's camera-centred water plane (rings of quads,
+ * fine near the camera and coarser outward), with the original MC_WATER tile
+ * cycled through its 16-phase ring for the BTA diagonal scroll. */
+static void draw_water_texture(uint16_t pass) {
+    static sat_water_plane_t water_plane __attribute__((section(".wram_l")));
     sat_vec3_t fwd={0,0,0};
     const sat_vec3_t delta={camera.target.x-camera.eye.x,0,camera.target.z-camera.eye.z};
     sat_vec3_normalize(&fwd,&delta);
@@ -586,19 +636,55 @@ static void draw_water_plane(uint16_t pass) {
     const sat_water_plane_config_t cfg={
         .min_x=CASTLE_WATER_REGION_X0,.max_x=CASTLE_WATER_REGION_X1,
         .min_z=CASTLE_WATER_REGION_Z0,.max_z=CASTLE_WATER_REGION_Z1,
-        .surface=CASTLE_WATER_Y,.cell=8*ONE,.cells=WATER_PLANE_CELLS,.rings=WATER_PLANE_RINGS,
+        .surface=CASTLE_WATER_Y,.cell=16*ONE,.cells=WATER_PLANE_CELLS,.rings=WATER_PLANE_RINGS,
         .underside=(uint8_t)(camera.eye.y<CASTLE_WATER_Y),
-        .wobble=ONE/8,.period=12*ONE,.speed=6,.tick=player.ticks,
-        .near_color=sat_gouraud_rgb(0,2,3),.far_color=sat_gouraud_rgb(6,6,4),
+        .wobble=0,.period=12*ONE,.speed=6,.tick=player.ticks,
+        .near_color=sat_gouraud_rgb(-11,0,10),.far_color=sat_gouraud_rgb(-8,4,12),
         .glint=3,.forward_x=fwd.x,.forward_z=fwd.z,
         .behind=(eye_h<0?-eye_h:eye_h)+4*ONE};
     SAT_PANIC_IF_ERROR(sat_water_plane_build(&water_plane,&cfg,camera.eye.x,camera.eye.z));
-    const sat_scene3d_material_t rings[WATER_PLANE_RINGS]={material,material,material,material};
+    water_texture_pick(player.ticks);
+    const sat_scene3d_material_t rings[WATER_PLANE_RINGS]={water_material,water_material,
+                                                          water_material,water_material};
     const uint16_t before=scene.faces.count;
     SAT_PANIC_IF_ERROR(sat_water_plane_submit(&scene,&water_plane,rings,pass));
     g_sm64ds_castle_stats.water_plane_faces=(uint16_t)(scene.faces.count-before);
 }
 #endif /* CASTLE_WATER_PLANE */
+#endif
+#ifdef CASTLE_PASS_DOOR_COUNT
+/* Internal room doors. The doorway is a closed wall in the KCL; the DS door
+ * actor carries Mario through it. Pressing into the wall beside a door moves
+ * him to the far side, facing along the door's axis. */
+static void door_pass(uint32_t wall_hits_before) {
+    if(player.swimming||player.dead||player.climbing||!player.grounded||
+       player.wall_hits==wall_hits_before) return;
+    for(uint32_t i=0;i<CASTLE_PASS_DOOR_COUNT;++i) {
+        const sat_vec3_t d=castle_pass_door_positions[i];
+        const int deg=castle_pass_door_yaw_deg[i];
+        const int32_t s=sat_sin_deg(deg*ONE),c=sat_cos_deg(deg*ONE);
+        const int32_t rx=player.feet.x-d.x,rz=player.feet.z-d.z;
+        const int32_t a=sat_fx16_mul(rx,s)+sat_fx16_mul(rz,c);
+        const int32_t t=sat_fx16_mul(rx,c)-sat_fx16_mul(rz,s);
+        const int32_t dy=player.feet.y-d.y;
+        if(a>=9*ONE||a<=-9*ONE||t>=12*ONE||t<=-12*ONE||dy>=16*ONE||dy<=-16*ONE) continue;
+        const int32_t out=a<0?13*ONE:-13*ONE;
+        /* Walk out through the middle of the leaf (the hinge sits at the
+         * doorway's edge), else where he pressed in. */
+        const int32_t lateral[3]={(ONE*48)/10,-(ONE*48)/10,t};
+        for(int k=0;k<3;++k) {
+            const int32_t nx=d.x+sat_fx16_mul(out,s)+sat_fx16_mul(lateral[k],c);
+            const int32_t nz=d.z+sat_fx16_mul(out,c)-sat_fx16_mul(lateral[k],s);
+            int32_t fy=0;
+            if(!sm64ds_floor(&castle_collision,nx,nz,player.feet.y+8*ONE,&fy)) continue;
+            if(fy>player.feet.y+8*ONE||fy<player.feet.y-8*ONE) continue;
+            player.feet=(sat_vec3_t){nx,fy,nz};
+            player.velocity_y=0;player.grounded=1;
+            facing=(deg+(a<0?0:180))%360;
+            return;
+        }
+    }
+}
 #endif
 static void simulation(const sat_pad_state_t *pad,uint8_t jump) {
     if(pad->held&SAT_PAD_L)yaw=(yaw+358)%360;
@@ -620,7 +706,13 @@ static void simulation(const sat_pad_state_t *pad,uint8_t jump) {
         facing=(heading+camera_yaw)%360;
     }
     if(!player.swimming) player.yaw=(uint16_t)((uint32_t)facing*65536u/360u);
+#ifdef CASTLE_PASS_DOOR_COUNT
+    const uint32_t wall_hits_before=player.wall_hits;
+#endif
     sm64ds_player_step(&player,&castle_collision,dx,dz,jump,(pad->held&SAT_PAD_B)!=0);
+#ifdef CASTLE_PASS_DOOR_COUNT
+    door_pass(wall_hits_before);
+#endif
     if(player.swimming) {
         facing=(int)((((uint32_t)player.yaw*360u)+32768u)>>16)%360;
         /* The camera eases round behind the swimmer unless L/R steer it. */
@@ -742,13 +834,26 @@ static void submit_mario_shadow(void) {
 #if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
 static void draw_warp_fade(uint8_t step) {
     if (step==0u) return;
-    sat_polygon_cmd_t cmd={
-        .x={-160,160,160,-160},
-        .y={-112,-112,112,112},
-        .color=SAT_RGB555(0,0,0),
-        .flags=step<3u?SAT_SPRITE_FLAG_HALF_TRANSPARENT:0u
-    };
-    SAT_PANIC_IF_ERROR(sat_vdp1_draw_polygon(&cmd));
+    if (step<3u) {
+        /* Fade to black: a half-transparent black quad over the scene. */
+        sat_polygon_cmd_t cmd={
+            .x={-160,160,160,-160},
+            .y={-112,-112,112,112},
+            .color=SAT_RGB555(0,0,0),
+            .flags=SAT_SPRITE_FLAG_HALF_TRANSPARENT
+        };
+        SAT_PANIC_IF_ERROR(sat_vdp1_draw_polygon(&cmd));
+        return;
+    }
+    /* Loading screen: lib-saturn sat_loading_screen_t bar fills over
+     * steps 3..22, then execute_stage_warp reads the next stage over the
+     * frozen last frame. Draws into the frame already begun by the main
+     * loop, so it must NOT call sat_begin_frame/sat_end_frame itself. */
+    if (!warp_loading.ready) sm64ds_loading_init(&warp_loading);
+    uint16_t pct=(uint16_t)(((uint32_t)(step-3u)*100u)/19u);
+    if (pct>100u) pct=100u;
+    sm64ds_loading_frame(&warp_loading, "NOW LOADING",
+                         warp_target?warp_target->bin:"", pct);
 }
 
 static void execute_stage_warp(const sm64ds_warp_t *target) {
@@ -958,6 +1063,9 @@ int main(void) {
     SAT_PANIC_IF_ERROR(sat_model_upload_textures(&shadow_model,&shadow_texture,1));
     shadow_material=(sat_scene3d_material_t){.kind=SAT_SCENE3D_INDEXED_TEXTURED,.rgb555=0,
         .texture=&shadow_texture,.color_calc_slot=SAT_INDEXED_SOLID_OPAQUE,.sprite_flags=SAT_SPRITE_FLAG_MESH};
+#ifdef CASTLE_WATER_PLANE
+    water_texture_init();
+#endif
 #ifdef CASTLE_PROPS_AVAILABLE
     SAT_PANIC_IF_ERROR(sat_model_upload_textures(&castle_tree_model,&tree_texture,1));
     tree_material=(sat_scene3d_material_t){.kind=SAT_SCENE3D_INDEXED_TEXTURED,.rgb555=0,
@@ -1143,6 +1251,12 @@ int main(void) {
 #endif
 #endif
     SAT_PANIC_IF_ERROR(sat_ascii_font_init_8x8_indexed8(&font,SAT_COLOR_WHITE,0,3));
+#if defined(CASTLE_WARP_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
+    /* Eager init so the loading screen's CRAM bank 6 is in place before any
+     * warp transition draws it (the lazy path in draw_warp_fade stays as a
+     * fallback). */
+    sm64ds_loading_init(&warp_loading);
+#endif
 #if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
     if (intro_cutscene_active) {
         intro_init_props();
@@ -1285,7 +1399,9 @@ int main(void) {
         }
         if (warp_fade>0u) {
             ++warp_fade;
-            if (warp_fade>=5u) execute_stage_warp(warp_target);
+            /* Hold the loading screen ~20 frames so the "NOW LOADING" bar is
+             * readable, then read the next stage over the frozen frame. */
+            if (warp_fade>=23u) execute_stage_warp(warp_target);
         }
 #endif
 #if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS
@@ -1337,6 +1453,15 @@ int main(void) {
             transform.rotation_deg.x=pitch*360;
         }
         SAT_PANIC_IF_ERROR(sat_model_transform3d_matrix(&transform,&actor_world));
+        if(player.swimming&&transform.rotation_deg.x) {
+            /* Pitch the swimmer about mid-body, not the feet, so a tilted
+             * Mario does not swing up out of the water. The local Y axis in
+             * the matrix is scaled by ONE/2, hence the doubling. */
+            const int32_t half=6*ONE;
+            actor_world.m[3]-=sat_fx16_mul(half,actor_world.m[1]*2);
+            actor_world.m[7]+=half-sat_fx16_mul(half,actor_world.m[5]*2);
+            actor_world.m[11]-=sat_fx16_mul(half,actor_world.m[9]*2);
+        }
 #if SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_GROUND_POSE
         if(player.grounded) {
             sat_vec3_t normal;int32_t floor;
@@ -1448,7 +1573,7 @@ int main(void) {
 #ifdef CASTLE_WATER_PLANE
             /* Built and queued while the Slave works; it still lands inside
              * the castle range, ahead of the Slave's chunks. */
-            draw_water_plane(SM64DS_WATER_PASS);
+            draw_water_texture(SM64DS_WATER_PASS);
 #endif
             if (slave_pending) slave_chunks_finish();
             for (uint8_t c=0;c<CASTLE_CHUNK_COUNT;++c)
@@ -1474,7 +1599,7 @@ int main(void) {
 #if defined(CASTLE_WATER_PLANE) && !defined(CASTLE_SLAVE_CHUNKS)
             /* The water surface draws between the submerged terrain and the
              * dry world / actors. */
-            draw_water_plane(SM64DS_WATER_PASS);
+            draw_water_texture(SM64DS_WATER_PASS);
 #endif
         }
 #if (!SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)) || (SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FAR_DEPTH_COUNT > 0 && (SM64DS_DIAG_GEOMETRIC_DEPTH || SM64DS_DIAG_PAIR_DEPTH || SM64DS_DIAG_SUPPORT_DEPTH))

@@ -1,16 +1,18 @@
-; Mednafen Saturn input override friendly keys for macOS
-; Key codes are macOS key codes matching run_mednafen.sh
-; Physical key -> Saturn button:
-;   Arrows   = D-pad (move / look)
-;   Z key    = A (jump)       X key = B (run)       C key = C (reset)
-;   A key    = X (zoom)       
-;   Q key    = L (cam left)   W key = R (cam right) Return = Start (pause)
-
-ss.input.port1.3dpad.up    keyboard 0x0 126
-ss.input.port1.3dpad.down  keyboard 0x0 125
-ss.input.port1.3dpad.left  keyboard 0x0 123
-ss.input.port1.3dpad.right keyboard 0x0 124
-ss.input.port1.3dpad.a     keyboard 0x0 29
-ss.input.port1.3dpad.b     keyboard 0x0 27
-ss.input.port1.3dpad.c     keyboard 0x0 06
-ss.input.port1.3dpad.start keyboard 0x0 31
+; SDL scancodes for Mednafen's keyboard device on macOS.
+; Arrow keys move Mario and steer swimming.
+; Q/W/E = Saturn X/Y/Z, A/S/D = Saturn A/B/C, R/T = L/R shoulders.
+; Return pauses.
+ss.input.port1 gamepad
+ss.input.port1.gamepad.up    keyboard 0x0 82
+ss.input.port1.gamepad.down  keyboard 0x0 81
+ss.input.port1.gamepad.left  keyboard 0x0 80
+ss.input.port1.gamepad.right keyboard 0x0 79
+ss.input.port1.gamepad.x     keyboard 0x0 20
+ss.input.port1.gamepad.y     keyboard 0x0 26
+ss.input.port1.gamepad.z     keyboard 0x0 8
+ss.input.port1.gamepad.a     keyboard 0x0 4
+ss.input.port1.gamepad.b     keyboard 0x0 22
+ss.input.port1.gamepad.c     keyboard 0x0 7
+ss.input.port1.gamepad.ls    keyboard 0x0 21
+ss.input.port1.gamepad.rs    keyboard 0x0 23
+ss.input.port1.gamepad.start keyboard 0x0 40

@@ -28,3 +28,6 @@ asset-output/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Local probe output
+probe.json

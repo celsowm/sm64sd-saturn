@@ -2,8 +2,15 @@
 
 `sm64ds_castle` supports camera-relative walking/running, jumping, landing,
 wall/ceiling collision, camera rotation, pause and reset on the original
-exterior. Original player states, CLPS surface behaviors, swimming, doors,
-actors, sound and missions remain open.
+exterior. The castle moat uses the original `MC_WATER` actor collision and
+supports swimming and the underwater tint. Original player states, the rest of
+CLPS surface behavior, doors, actors, sound and missions remain open.
+
+The disc boots through a real SM64DS-style intro (`0.BIN`): the Nintendo boot
+logo and MARIO 64 DS IPL wordmark splash, then the animated title screen with
+the Mario and Yoshi face demos, orbiting Power Star, scrolling VDP2 clouds and
+the TITLE/PEACH ADX music, then Princess Peach's letter with voice clips,
+before handing off to the castle grounds.
 
 ## Build and play
 
@@ -42,6 +49,14 @@ the final 16 bytes of the normal table.
 World scale is 64 Saturn units per BMD unit and 0.064 per DS gameplay unit.
 Median reconstructed KCL corner-to-BMD-vertex distance is below 0.04 Saturn
 unit. KCL attributes are retained; CLPS behavior is not interpreted yet.
+
+Castle Grounds water is not part of the stage KCL. The original moat is the
+`MC_WATER` actor (ov009 `daObjMcWater_c`): its own KCL is a flat rectangle at
+`y=-6.4` covering the map. The exporter merges those prisms into the stage
+collision under a free CLPS attribute marked as water, so the existing swim,
+underwater tint and water-plane code see the original surface. The actor's
+animated water texture is not ported yet; the visible surface is a blue
+Gouraud plane.
 
 Simulation runs at 60 Hz from elapsed time with four movement substeps, floor
 and step queries, wall sliding, ceiling response and void reset. Catch-up is
@@ -302,3 +317,36 @@ ms (orbit).
   went from 31.6 to 25.2 ms a draw on castle controls.
 - Mario's head mesh tables and textures moved to Low WRAM: the castle ELF
   links with the 16 KiB Master stack reserve and has little High WRAM to spare.
+
+## Guided video: intro to King Bob-omb
+
+`tools/make_guided_video.py` renders one uncut playthrough from the title
+screen to King Bob-omb's Power Star. It runs a single deterministic probe run
+on the unified disc `build/castle/disc/sm64ds_castle.cue`, which chains
+intro → castle grounds → Castle 1F → Bob-omb Battlefield, then records frames
+and audio and draws chapter captions.
+
+- Route: `tests/guided_route.pad`. Ordinary probe pad script; `#@ <field> <text>`
+  lines are captions and `#@end <field>` sets the last recorded field.
+- The script first checks the final High WRAM telemetry (`boss_hp == 0`,
+  star 1 collected) and refuses to write the video otherwise.
+  `--verify-only` runs that check without encoding.
+- Output: `private/guided/sm64ds_bob_omb_guided.mp4` (default). Copy it to
+  Downloads by hand; the script does not touch Downloads.
+- Options: `--fps {15,20,30,60}` (default 30), `--scale N` (default 3).
+
+Run order: `./build-castle.sh`, then `python3 tools/make_guided_video.py`.
+The route only holds for the disc built from the same sources, because the
+probe is deterministic per build. After any change to game logic, rerun
+`--verify-only` before encoding.
+
+Fixes made while building the route (in `runtime/sm64ds_play.c` and
+`src/castle.c`):
+
+- Terrace climb: the first landing is taken deeper (`climb_start`), so the
+  player no longer falls back off the lip.
+- Terrace climb: `push_walls` ignores ceiling normals while a mantle is in
+  progress (`push_ignore_ceilings`), so the underside of the terrace no
+  longer pushes the player back down mid-climb.
+- Castle 1F door and painting access: `door_pass` lets the player pass the
+  non-exit door actors (`tools/prepare_castle.py` emits the door positions).

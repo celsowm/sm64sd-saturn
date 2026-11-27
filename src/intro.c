@@ -38,6 +38,7 @@
 #include "intro_audio.h"
 #include "intro_star.h"
 #include "mario_face.h"
+#include "yoshi_face.h"
 #include "peach_actor.h"
 #include "sm64ds_background.h"
 #include "sm64ds_pose.h"
@@ -47,7 +48,7 @@
 SAT_MUSIC_CODECS_ADX_FROM_DISC_ONLY;
 
 #define ONE SAT_FX16_ONE
-#define INTRO_SCENE_CAP 1600u
+#define INTRO_SCENE_CAP 3200u
 #define INTRO_HUD_RESERVE 120u
 #define INTRO_VDP2_BG_ADDR 0x00000u
 #define INTRO_2D_PAL_BANK 5u
@@ -123,6 +124,22 @@ static sat_mat4_t mf_world;
 static sat_aabb3_t mf_bounds;
 static sat_scene3d_instance_t mf_inst;
 
+/* Yoshi Face Demo companion (18 bones) */
+static sat_vec3_t yf_verts[YOSHI_FACE_VERTEX_COUNT];
+static sat_vec3_t yf_wverts[YOSHI_FACE_VERTEX_COUNT] __attribute__((section(".wram_l")));
+static sat_projected_vertex_t yf_proj[YOSHI_FACE_VERTEX_COUNT] __attribute__((section(".wram_l")));
+static uint16_t yf_indices[YOSHI_FACE_FACE_COUNT * 4u];
+static sat_vdp1_texture_t yf_textures[YOSHI_FACE_TEXTURE_COUNT];
+static sat_scene3d_material_t yf_materials[YOSHI_FACE_TEXTURE_COUNT + 1u];
+static uint16_t yf_face_mats[YOSHI_FACE_FACE_COUNT];
+static sat_mesh_t yf_mesh;
+static sat_skeleton_pose_joint_t yf_pose[YOSHI_FACE_JOINT_COUNT];
+static sat_vec3_t yf_scales[YOSHI_FACE_JOINT_COUNT];
+static sat_mat4_t yf_bones[YOSHI_FACE_JOINT_COUNT];
+static sat_mat4_t yf_world;
+static sat_aabb3_t yf_bounds;
+static sat_scene3d_instance_t yf_inst;
+
 /* Intro Power Star (1 bone) */
 static sat_vec3_t st_verts[INTRO_STAR_VERTEX_COUNT];
 static sat_vec3_t st_wverts[INTRO_STAR_VERTEX_COUNT];
@@ -160,6 +177,8 @@ static sat_vdp1_texture_t tex_banner_title;
 static sat_vdp1_texture_t tex_banner_nintendo;
 static sat_vdp1_texture_t tex_banner_start;
 static sat_vdp1_texture_t tex_peach_card;
+static sat_vdp1_texture_t tex_logo_nintendo;
+static sat_vdp1_texture_t tex_logo_mario64ds;
 static sat_ascii_font_t hud_font;
 static sat_hud_t hud;
 
@@ -461,12 +480,25 @@ static void set_vdp2_palette(const uint16_t* pal) {
 static void exec_castle_grounds(uint8_t entrance, int keep_display) {
     g_sm64ds_intro_stats.exec_attempts++;
     music_stop_and_close();
+    /* Clear the fade-to-black colour offset so the loading screen draws at
+     * full brightness instead of being dimmed to black. */
+    set_fade_offset(0);
     if (cd_mounted == 0u) {
         if (sat_cd_mount_default(&cd_block, 0, 0, &cd_device, 0u, &cd_volume) == SAT_OK) {
             cd_mounted = 1u;
         }
     }
     if (cd_mounted != 0u) {
+        /* Draw a "NOW LOADING" progress screen (lib-saturn sat_loading_screen_t)
+         * before reading the next stage. sat_exec_keep_display preserves it
+         * over the disc read; sat_exec blanks the display but it still shows
+         * for the frame that precedes the read. */
+        static sm64ds_loading_t loading;
+        sm64ds_loading_init(&loading);
+        INTRO_MUST(sat_vdp1_set_erase_transparent());
+        INTRO_MUST(sat_begin_frame());
+        sm64ds_loading_frame(&loading, "NOW LOADING", "EXT.BIN", 60u);
+        INTRO_MUST(sat_end_frame());
         sm64ds_warp_arg_t arg = {
             .magic = SM64DS_WARP_MAGIC,
             .entrance = entrance,
@@ -488,6 +520,14 @@ static void pose_mario_face(int32_t anim_time) {
     INTRO_MUST(sm64ds_clip_sample_scale(&mario_face_scale_clips[0], c, anim_time, mf_scales, MARIO_FACE_JOINT_COUNT));
     INTRO_MUST(sm64ds_pose_world_matrices(&mario_face_skeleton, mf_pose, mf_scales, mf_bones, MARIO_FACE_JOINT_COUNT));
     INTRO_MUST(sat_skin_update_mesh(&mario_face_skin, mf_bones, MARIO_FACE_JOINT_COUNT, &mf_mesh, 0, &mf_bounds));
+}
+
+static void pose_yoshi_face(int32_t anim_time) {
+    const sat_skeleton_clip_t* c = &yoshi_face_clips[0];
+    INTRO_MUST(sat_clip_sample(c, anim_time, yf_pose, YOSHI_FACE_JOINT_COUNT));
+    INTRO_MUST(sm64ds_clip_sample_scale(&yoshi_face_scale_clips[0], c, anim_time, yf_scales, YOSHI_FACE_JOINT_COUNT));
+    INTRO_MUST(sm64ds_pose_world_matrices(&yoshi_face_skeleton, yf_pose, yf_scales, yf_bones, YOSHI_FACE_JOINT_COUNT));
+    INTRO_MUST(sat_skin_update_mesh(&yoshi_face_skin, yf_bones, YOSHI_FACE_JOINT_COUNT, &yf_mesh, 0, &yf_bounds));
 }
 
 static void pose_intro_star(int32_t anim_time) {
@@ -534,6 +574,10 @@ int main(void) {
         &tex_banner_start, intro_banner_start_pixels, INTRO_BANNER_START_W, INTRO_BANNER_START_H, INTRO_2D_PAL_BANK));
     SAT_PANIC_IF_ERROR(sat_tex_upload_indexed8_pixels(
         &tex_peach_card, intro_peach_letter_card_pixels, INTRO_PEACH_LETTER_CARD_W, INTRO_PEACH_LETTER_CARD_H, INTRO_2D_PAL_BANK));
+    SAT_PANIC_IF_ERROR(sat_tex_upload_indexed8_pixels(
+        &tex_logo_nintendo, intro_logo_nintendo_pixels, INTRO_LOGO_NINTENDO_W, INTRO_LOGO_NINTENDO_H, INTRO_2D_PAL_BANK));
+    SAT_PANIC_IF_ERROR(sat_tex_upload_indexed8_pixels(
+        &tex_logo_mario64ds, intro_logo_mario64ds_pixels, INTRO_LOGO_MARIO64DS_W, INTRO_LOGO_MARIO64DS_H, INTRO_2D_PAL_BANK));
 
     SAT_PANIC_IF_ERROR(sat_ascii_font_init_8x8_indexed8(&hud_font, SAT_COLOR_WHITE, SAT_COLOR_BLACK, INTRO_HUD_PAL_BANK));
     SAT_PANIC_IF_ERROR(sat_hud_init(&hud, &hud_font, SAT_COLOR_WHITE, 8u));
@@ -766,7 +810,7 @@ int main(void) {
             pose_mario_face(anim_time_mf);
             pose_intro_star(anim_time_st);
 
-            /* Mario Face Demo centered cleanly between title logo and PRESS START */
+            /* Mario Face Demo, centered between title logo and PRESS START */
             sat_model_transform3d_t tr;
             sat_model_transform3d_identity(&tr);
             int32_t idle_sway = sat_sin_deg((int32_t)((state_ticks * 3u) % 360u) * ONE);
@@ -824,15 +868,25 @@ int main(void) {
 
         /* Overlay 2D banners & prompts (sat_draw_sprite_screen takes sprite CENTER coordinates) */
         if (state == INTRO_STATE_SPLASH) {
+            /* Real Nintendo boot logo, centered, with the MARIO 64 DS IPL
+             * wordmark below it (the DS "IPL download" splash). */
             (void)sat_draw_sprite_screen(
-                &tex_banner_nintendo,
+                &tex_logo_nintendo,
                 160,
-                96,
-                INTRO_BANNER_NINTENDO_W,
-                INTRO_BANNER_NINTENDO_H,
+                80,
+                INTRO_LOGO_NINTENDO_W,
+                INTRO_LOGO_NINTENDO_H,
                 0u
             );
-            (void)sat_hud_text(&hud, "SEGA SATURN PORT", 96, 126);
+            (void)sat_draw_sprite_screen(
+                &tex_logo_mario64ds,
+                160,
+                124,
+                INTRO_LOGO_MARIO64DS_W,
+                INTRO_LOGO_MARIO64DS_H,
+                0u
+            );
+            (void)sat_hud_text(&hud, "SEGA SATURN PORT", 96, 150);
         } else if (state == INTRO_STATE_TITLE) {
             (void)sat_draw_sprite_screen(
                 &tex_banner_title,

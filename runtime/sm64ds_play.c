@@ -139,7 +139,12 @@ int sm64ds_water_surface(const sm64ds_collision_t *w,int32_t x,int32_t z,
            x<p->min.x||x>p->max.x||z<p->min.z||z>p->max.z)continue;
         int32_t y=plane_y(p,x,z);
         if(y<from||y>=best)continue;
-        if(inside(p,(sat_vec3_t){x,y,z},ONE/32)) {best=y;found=1;}
+        /* The XZ filter above is the containment test: the water surface is
+         * a slab and the generated water KCL triangles are nearly
+         * degenerate, so `inside()` (which is for solid wedge prisms)
+         * would only accept the prism origin. Take the lowest surface at or
+         * above the query point. */
+        best=y;found=1;
     }
     if(found)*height=best;
     return found;
@@ -199,6 +204,7 @@ void sm64ds_player_add_coins(sm64ds_player_t *p,uint16_t amount) {
     if(p->coins/50u>before/50u)sm64ds_player_heal(p,1);
 }
 /* Push the body capsule out of walls and ceilings; returns the wall contacts. */
+static uint8_t push_ignore_ceilings;   /* set while a mantle rises past an overhang */
 static uint32_t push_walls(sm64ds_player_t *p,const sm64ds_collision_t *w) {
     uint32_t hits=0;
     for(int iteration=0;iteration<3;++iteration) {
@@ -207,6 +213,7 @@ static uint32_t push_walls(sm64ds_player_t *p,const sm64ds_collision_t *w) {
         for(uint32_t k=w->offsets[bin];k<w->offsets[bin+1];++k) {
             const sm64ds_prism_t *t=&w->prisms[w->indices[k]];
             if(t->normal.y>=ONE/2)continue;
+            if(push_ignore_ceilings&&t->normal.y< -ONE/2)continue;
             if(p->feet.x<t->min.x-RADIUS||p->feet.x>t->max.x+RADIUS||
                p->feet.z<t->min.z-RADIUS||p->feet.z>t->max.z+RADIUS||
                p->feet.y>t->max.y+RADIUS||p->feet.y+HEIGHT<t->min.y)continue;
@@ -400,6 +407,25 @@ static void climb_start(sm64ds_player_t *p,const sm64ds_collision_t *w,sat_vec3_
     uint8_t slippery;
     if(!floor_query(w,x,z,p->feet.y+CLIMB_MAX,&top,0,&slippery,0,1) ||
        slippery || top<=p->feet.y+STEP || top<wall->max.y-STEP) return;
+    /* Land a body radius further onto the terrace so the wall push-out at the
+     * end of the mantle cannot slide the player back over the lip. */
+    {
+        const int32_t deep=reach+RADIUS+ONE;
+        const int32_t x2=p->feet.x-mul(deep,wall->normal.x);
+        const int32_t z2=p->feet.z-mul(deep,wall->normal.z);
+        int32_t top2;
+        uint8_t slippery2;
+        if(floor_query(w,x2,z2,p->feet.y+CLIMB_MAX,&top2,0,&slippery2,0,1) &&
+           !slippery2 && top2>=top-STEP && top2<=top+STEP) {
+            p->climb_top=(sat_vec3_t){x2,top2,z2};
+            p->climbing=1;
+            p->climb_steps=0;
+            p->velocity_y=0;
+            p->grounded=0;
+            ++p->climb_count;
+            return;
+        }
+    }
     p->climb_top=(sat_vec3_t){x,top,z};
     p->climbing=1;
     p->climb_steps=0;
@@ -419,7 +445,11 @@ static void climb_step(sm64ds_player_t *p,const sm64ds_collision_t *w,uint8_t ju
         return;
     }
     p->feet.y+=CLIMB_SPEED;
+    /* The underside of the terrace being climbed must not shove the body
+     * back down: the top was validated when the mantle started. */
+    push_ignore_ceilings=1;
     push_walls(p,w);
+    push_ignore_ceilings=0;
     if(p->feet.y>=p->climb_top.y) {
         p->feet=p->climb_top;
         push_walls(p,w);

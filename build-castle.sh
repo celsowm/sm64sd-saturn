@@ -11,7 +11,7 @@ python3 tools/prepare_castle.py --rom "$rom" --out private/castle \
   --merge-quads --vertex-colors --lut4 \
   --max-edge 48 --chunk-size 128 --max-tile-size 48 \
   --texture-samples 4 --adaptive-priorities tools/castle_adaptive_priorities.json \
-  --texture-budget 245760 --with-intro-props
+  --texture-budget 245760 --with-intro-props --water-layers
 python3 tools/prepare_castle.py --rom "$rom" --out private/castle_1f \
   --stage castle_1f --warp-target EXT.BIN \
   --merge-quads --vertex-colors --lut4 \

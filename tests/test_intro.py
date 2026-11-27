@@ -11,6 +11,8 @@ from pathlib import Path
 from tools.sm64ds_pipeline.compression import lz77_auto
 from tools.sm64ds_pipeline.ds2d import (
     extract_cloud_atlas,
+    extract_mario64ds_ipl_logo,
+    extract_nintendo_logo,
     render_mario3d_banner,
     render_peach_letter_card,
 )
@@ -80,6 +82,20 @@ class TestIntroPipelineWithRom(unittest.TestCase):
         self.assertEqual(len(clouds.pixels), 16384)
         self.assertEqual(len(clouds.palette), 16)
 
+    def test_real_title_logos(self):
+        # The Nintendo boot logo is the real 8bpp 128x16 NSC (red oval +
+        # gradient wordmark), with a transparent background.
+        nintendo = extract_nintendo_logo(self.fs)
+        self.assertEqual((nintendo.width, nintendo.height), (128, 16))
+        ink = sum(1 for p in nintendo.pixels if p & 0x8000)
+        self.assertGreater(ink, 400)
+        self.assertLess(ink, 128 * 16)
+        # The MARIO 64 DS IPL wordmark is the real 8bpp 64x16 NCG.
+        mario = extract_mario64ds_ipl_logo(self.fs)
+        self.assertEqual((mario.width, mario.height), (64, 16))
+        mario_ink = sum(1 for p in mario.pixels if p & 0x8000)
+        self.assertGreater(mario_ink, 150)
+
     def test_sdat_intro_tracks_and_voice_waves(self):
         sdat = SdatArchive(self.fs.read("data/sound_data.sdat"))
         peach_waves = sdat.decode_swar_waves(1)
@@ -102,9 +118,11 @@ class TestIntroPipelineWithRom(unittest.TestCase):
             out = Path(tmp)
             summary = prepare_intro(self.rom, out)
             self.assertEqual(summary["mario_face"]["bones"], 29)
+            self.assertEqual(summary["yoshi_face"]["bones"], 18)
             self.assertEqual(summary["peach_actor"]["bones"], 21)
             for rel in (
                 "mario_face.h", "mario_face.c",
+                "yoshi_face.h", "yoshi_face.c",
                 "intro_star.h", "intro_star.c",
                 "peach_actor.h", "peach_actor.c",
                 "intro_2d.h", "intro_2d.c",

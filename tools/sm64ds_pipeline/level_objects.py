@@ -41,6 +41,10 @@ class PaintingPlacement:
     height: float
     room: int
     centered_y: bool = False
+    # Picture-gate param word: bits 0-3 width, 4-7 height, 8-12 picture id,
+    # 13-14 state row. State 0 is the proximity ripple mesh.
+    param: int = 0
+    state: int = 0
 
 
 @dataclass(frozen=True)
@@ -119,6 +123,52 @@ def _ptr_to_off(ptr: int, ram_addr: int, size: int) -> int:
     if not 0 <= off < size:
         raise FormatError(f"overlay pointer 0x{ptr:08x} outside overlay")
     return off
+
+
+CASTLE_1F_PIC_GATE_OVERLAY_ID = 80
+RIPPLE_WAVE_ROWS = 12
+RIPPLE_WAVE_ROW_BYTES = 20
+
+
+def castle_1f_wave_table(fs: Filesystem) -> tuple[tuple[int, int, int, int, int], ...]:
+    """Read the picture-gate WaveParams table from overlay 80.
+
+    Twelve rows of five 32-bit words: amplitude, phase step, wavelength,
+    radius and duration. Rows 0-5 are the front wave and 6-11 the back wave;
+    each half shares its phase step and duration. The table is found
+    structurally (constant amplitude/wavelength, two phase/duration halves)
+    rather than by a build-space address, so a ROM revision cannot silently
+    point the wave at unrelated data.
+    """
+    _ram, data = read_arm9_overlay(fs, CASTLE_1F_PIC_GATE_OVERLAY_ID)
+    table_bytes = RIPPLE_WAVE_ROWS * RIPPLE_WAVE_ROW_BYTES
+    matches: list[tuple[tuple[int, int, int, int, int], ...]] = []
+    for off in range(0, len(data) - table_bytes + 1, 4):
+        rows = tuple(
+            struct.unpack_from("<5i", data, off + r * RIPPLE_WAVE_ROW_BYTES)
+            for r in range(RIPPLE_WAVE_ROWS)
+        )
+        if _plausible_wave_rows(rows):
+            matches.append(rows)
+    if len(matches) != 1:
+        raise FormatError(f"expected one picture-gate wave table, found {len(matches)}")
+    return matches[0]
+
+
+def _plausible_wave_rows(rows) -> bool:
+    if len({r[0] for r in rows}) != 1 or len({r[2] for r in rows}) != 1:
+        return False
+    if not (0 < rows[0][0] < 1 << 20 and 0 < rows[0][2] < 1 << 24):
+        return False
+    front, back = rows[:6], rows[6:]
+    for half in (front, back):
+        if len({r[1] for r in half}) != 1 or len({r[4] for r in half}) != 1:
+            return False
+        if not (0 < half[0][1] < 65536 and 0 < half[0][4] < 1000):
+            return False
+    if front[0][1] == back[0][1]:
+        return False
+    return all(0 < r[3] < 1 << 28 for r in rows)
 
 
 # Painting param high-byte -> NitroFS model path for Castle 1F course paintings.
@@ -211,6 +261,8 @@ def extract_castle_1f_objects(fs: Filesystem) -> Castle1fObjects:
                             width=w_units,
                             height=h_units,
                             room=room,
+                            param=param,
+                            state=(param >> 13) & 3,
                         ))
                 elif oid == OBJ_ID_BOWSER_PAINTING:
                     paintings.append(PaintingPlacement(
@@ -221,6 +273,7 @@ def extract_castle_1f_objects(fs: Filesystem) -> Castle1fObjects:
                         height=37.5,
                         room=room,
                         centered_y=True,
+                        state=3,
                     ))
                 elif oid == OBJ_ID_KINOPIO:
                     toads.append(LevelProp(
