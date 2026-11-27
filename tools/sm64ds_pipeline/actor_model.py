@@ -49,10 +49,19 @@ def bake_actor(fs, name, bmd_path, placements, *, scale=0.5, byte_budget=6144, m
     bmd = convert_bmd(fs.read(bmd_path))
     rw = rest_world(bmd)
     verts = []
-    for v in bmd.vertices:
+    # Billboard bones (BMD bone flag): the DS turns their geometry to face the
+    # camera. Keep each such vertex's bone pivot and its offset in the bone's
+    # XY plane; the runtime rebuilds the vertex from the camera axes.
+    billboard = []   # (vertex index, pivot xyz, offset xy)
+    for vi, v in enumerate(bmd.vertices):
         p = tuple(c * (1 << bmd.scale_shift) / 4096.0 for c in (v.x, v.y, v.z))
         if v.joint < len(bmd.bones):
             lin, tr = rw[v.joint]
+            if bmd.bones[v.joint].billboard:
+                sx = math.sqrt(sum(lin[r][0] ** 2 for r in range(3)))
+                sy = math.sqrt(sum(lin[r][1] ** 2 for r in range(3)))
+                billboard.append((vi, tuple(c * scale for c in tr),
+                                  (p[0] * sx * scale, p[1] * sy * scale)))
             p = tuple(a + b for a, b in zip(mv(lin, p), tr))
         verts.append(tuple(c * scale for c in p))
     if behavior in (5, 6):
@@ -69,6 +78,7 @@ def bake_actor(fs, name, bmd_path, placements, *, scale=0.5, byte_budget=6144, m
         texs, luts, lut_count, ftex, _ = adaptive_lut4_bakes(
             srcs, uvs, mats, colors=cols, byte_budget=byte_budget, samples=2,
             face_areas=[_area(verts, f) for f in faces], max_size=max_size)
+        billboard = []   # the sprite quad replaces the model's vertices
     else:
         faces, uvs, mats, cols, _, _ = merge_coplanar_quads(
             verts, bmd.faces, bmd.face_uvs, bmd.face_materials, colors=bmd.face_colors)
@@ -94,8 +104,17 @@ def bake_actor(fs, name, bmd_path, placements, *, scale=0.5, byte_budget=6144, m
           f'static const sat_model_asset_t {name}_model={{.vertices={name}_vertices,.vertex_count={V},'
           f'.indices={name}_faces,.face_count={F},.face_texture_indices={name}_face_textures,'
           f'.textures={name}_textures,.texture_count={T},.palettes_rgb555=0,.palette_count=0,'
-          f'.palette_base=0,.luts_rgb555={name}_luts,.lut_count={lut_count}}};',
-          f'static const sat_vec3_t {name}_positions[]={{', ',\n'.join(_vec(p[:3]) for p in placements), '};',
+          f'.palette_base=0,.luts_rgb555={name}_luts,.lut_count={lut_count}}};']
+    if billboard:
+        c += [f'static const uint16_t {name}_bb_index[]={{', _rows([b[0] for b in billboard]), '};',
+              f'static const sat_vec3_t {name}_bb_pivot[]={{', ',\n'.join(_vec(b[1]) for b in billboard), '};',
+              f'static const int32_t {name}_bb_offset[]={{',
+              _rows([_fx(o) for b in billboard for o in b[2]]), '};']
+        bb_init = (f'.bb_count={len(billboard)},.bb_index={name}_bb_index,'
+                   f'.bb_pivot={name}_bb_pivot,.bb_offset={name}_bb_offset,')
+    else:
+        bb_init = ''
+    c += [f'static const sat_vec3_t {name}_positions[]={{', ',\n'.join(_vec(p[:3]) for p in placements), '};',
           f'static const int16_t {name}_yaw[]={{', _rows([p[3] for p in placements]), '};',
           f'static sat_vec3_t {name}_v[{V}],{name}_w[{V}];',
           f'static uint16_t {name}_idx[{F * 4}],{name}_fm[{F}];',
@@ -112,8 +131,8 @@ def bake_actor(fs, name, bmd_path, placements, *, scale=0.5, byte_budget=6144, m
           f'.one_sided={int(one_sided)},.max_depth={max_depth},',
           f'.v={name}_v,.w={name}_w,.idx={name}_idx,.fm={name}_fm,.tex={name}_tex,.mat={name}_mat,',
           f'.proj={name}_proj,.prog={name}_prog,.worlds={name}_worlds,.vcap={V},.fcap={F},.tcap={T},',
-          f'.behavior={behavior},.speed={_fx(speed)},.range={_fx(range_)},.radius={_fx(radius)},.fuse_steps={fuse_steps},.blast={_fx(blast)},.hp={hp},.top={_fx(top)},.stun_steps={stun_steps},.coin_value={coin_value},{star_init}{unlock_init}',
+          f'.behavior={behavior},.speed={_fx(speed)},.range={_fx(range_)},.radius={_fx(radius)},.fuse_steps={fuse_steps},.blast={_fx(blast)},.hp={hp},.top={_fx(top)},.stun_steps={stun_steps},.coin_value={coin_value},{star_init}{unlock_init}{bb_init}',
           f'.pos={name}_pos,.yaw_live={name}_yawv,.st={name}_st,.tm={name}_tm,'
           f'.vx={name}_vx,.vy={name}_vy,.vz={name}_vz}};', '']
     return '\n'.join(c), {'kind': name, 'bmd': bmd_path, 'count': n, 'vertices': V, 'faces': F,
-                          'textures': T, 'texture_bytes': lut_count * 32 + sum(len(t.pixels) for t in texs)}
+                          'textures': T, 'billboard_vertices': len(billboard), 'texture_bytes': lut_count * 32 + sum(len(t.pixels) for t in texs)}

@@ -38,10 +38,36 @@ sat_result_t sm64ds_actor_kind_init(sm64ds_actor_kind_t* k) {
     return SAT_OK;
 }
 
+/* Turn placement i's billboard vertices to face the screen. Like the DS, the
+ * quad lies in the view plane (screen-aligned), not toward the eye, so a body
+ * near the screen edge does not project slanted. The axes are built in world
+ * space from the camera view direction, then taken back to model space with
+ * the transposed rotation of worlds[i], since the scene transforms the mesh
+ * by that matrix. The vertices are shared by every placement, so this runs
+ * right before each placement is submitted. */
+static void actor_billboard(sm64ds_actor_kind_t* k, uint32_t i, const sat_vec3_t* view) {
+    if (!k->bb_count || (!view->x && !view->z)) return;   /* straight down: keep last pose */
+    const int32_t* m = k->worlds[i].m;
+    sat_vec3_t right = {-view->z, 0, view->x}, up;   /* same convention as castle_props */
+    sat_vec3_normalize(&right, &right);
+    sat_vec3_cross(&up, &right, view);               /* screen up, y > 0 */
+    for (uint16_t b = 0; b < k->bb_count; ++b) {
+        const int32_t ox = k->bb_offset[2u * b], oy = k->bb_offset[2u * b + 1u];
+        const int32_t wx = sat_fx16_mul(right.x, ox) + sat_fx16_mul(up.x, oy);
+        const int32_t wy = sat_fx16_mul(right.y, ox) + sat_fx16_mul(up.y, oy);
+        const int32_t wz = sat_fx16_mul(right.z, ox) + sat_fx16_mul(up.z, oy);
+        const sat_vec3_t pv = k->bb_pivot[b];
+        k->v[k->bb_index[b]] = (sat_vec3_t){
+            pv.x + sat_fx16_mul(m[0], wx) + sat_fx16_mul(m[4], wy) + sat_fx16_mul(m[8], wz),
+            pv.y + sat_fx16_mul(m[1], wx) + sat_fx16_mul(m[5], wy) + sat_fx16_mul(m[9], wz),
+            pv.z + sat_fx16_mul(m[2], wx) + sat_fx16_mul(m[6], wy) + sat_fx16_mul(m[10], wz)};
+    }
+}
+
 sat_result_t sm64ds_actor_kind_submit(
     sm64ds_actor_kind_t* k, sat_scene_t* scene, const sat_vec3_t* eye,
     const sat_vec3_t* fwd, const sat_vec3_t* right, uint32_t face_limit,
-    const sat_vec3_t* player_feet, uint16_t player_height) {
+    const sat_vec3_t* player_feet, uint16_t player_height, const sat_vec3_t* view) {
     k->drawn = 0;
     if (k->behavior == SM64DS_ACTOR_BOSS && k->hp_left == 0 && !k->defeated && k->hp) k->hp_left = k->hp;
     for (uint32_t i = 0; i < k->count; ++i) {
@@ -60,6 +86,7 @@ sat_result_t sm64ds_actor_kind_submit(
         if (sat_fx16_abs(lat) > depth + 16 * ONE) continue;
         if (scene->faces.count + k->fcap > face_limit) continue;   /* scene full: drop this one */
         k->prop.world = k->worlds[i];
+        if (view) actor_billboard(k, i, view);
         const sat_result_t r = sat_scene_submit_instance(
             scene, &k->prop.instance, SAT_SCENE3D_SLOT_INHERIT, k->proj, k->w);
         if (r != SAT_OK) return r;

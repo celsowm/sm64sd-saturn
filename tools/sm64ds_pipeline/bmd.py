@@ -14,6 +14,9 @@ class Bone:
     trans:tuple[int,int,int]
     scale:tuple[int,int,int]
     angles:tuple[int,int,int]
+    # Bone record +0x3C bit 0: the DS draws this bone's geometry facing the
+    # camera (e.g. King Bob-omb's round body is one flat billboard quad).
+    billboard:bool=False
 
 @dataclass(frozen=True)
 class WeightedMatrix:
@@ -118,7 +121,8 @@ def convert_bmd(blob:bytes)->Model:
         if parent==bid:parent=-1
         if parent>=bid or parent< -1:raise FormatError(f'non-parent-first BMD joint ID {bid}')
         by_id[bid]=Bone(bid,parent,field(data,at+0x24,'iii'),
-                        field(data,at+0x10,'iii'),field(data,at+0x1c,'HHH'))
+                        field(data,at+0x10,'iii'),field(data,at+0x1c,'HHH'),
+                        bool(field(data,at+0x3c,'I')&1))
     if len(by_id)!=nb:raise FormatError('incomplete BMD bones')
     bones=[by_id[i] for i in range(nb)]
     weighted=_weighted(data,field(data,0x34,'I'),num_weighted,nb)

@@ -75,9 +75,11 @@ static void submit_castle_props(void) {
         ++hud_signs_drawn;
     }
 #ifdef CASTLE_ACTOR_KINDS_AVAILABLE
+    sat_vec3_t view={camera.target.x-camera.eye.x,camera.target.y-camera.eye.y,camera.target.z-camera.eye.z};
+    sat_vec3_normalize(&view,&view);
     for (uint32_t k=0;k<CASTLE_ACTOR_KIND_COUNT;++k)
         SAT_PANIC_IF_ERROR(sm64ds_actor_kind_submit(castle_actor_kinds[k],&scene,&camera.eye,&fwd,&right,CAP,
-                                                   &player.feet,12u));
+                                                   &player.feet,12u,&view));
 #endif
 }
 #endif

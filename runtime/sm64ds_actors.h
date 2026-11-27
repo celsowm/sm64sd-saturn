@@ -65,6 +65,14 @@ typedef struct sm64ds_actor_kind {
     uint16_t* tm;
     int32_t* vx, *vy, *vz; /* boss: throw ballistics / held follow */
     uint8_t held_yaw;      /* boss: yaw Mario is facing while carrying */
+    /* Billboard bones (BMD bone flag): these mesh vertices are rebuilt each
+     * submission as pivot + offset.x * screen right + offset.y * screen up,
+     * in model space, so the DS's camera-facing quads (a round body, a glow)
+     * stay round from every side instead of showing edge-on. */
+    uint16_t bb_count;
+    const uint16_t* bb_index;
+    const sat_vec3_t* bb_pivot;   /* model space, 16.16 */
+    const int32_t* bb_offset;     /* x, y pairs in the bone's plane, 16.16 */
     /* State owned by the runtime. */
     sm64ds_background_t prop;
     sat_scene3d_material_programs_t programs;
@@ -77,11 +85,12 @@ sat_result_t sm64ds_actor_kind_init(sm64ds_actor_kind_t* kind);
 /* Submit every placement in front of the camera. fwd/right are the camera's
  * horizontal basis. Returns the number submitted through kind->drawn.
  * player_feet (optional) culls placements farther than a body-height above
- * or below Mario. */
+ * or below Mario. view (optional) is the unit eye-to-target direction; it
+ * turns billboard bones to face the screen. */
 sat_result_t sm64ds_actor_kind_submit(
     sm64ds_actor_kind_t* kind, sat_scene_t* scene, const sat_vec3_t* eye,
     const sat_vec3_t* fwd, const sat_vec3_t* right, uint32_t face_limit,
-    const sat_vec3_t* player_feet, uint16_t player_height);
+    const sat_vec3_t* player_feet, uint16_t player_height, const sat_vec3_t* view);
 
 /* One fixed 60 Hz step. A chaser that reaches the player either hits at
  * once (fuse_steps == 0) or lights its fuse and explodes after fuse_steps,
