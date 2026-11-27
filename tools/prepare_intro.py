@@ -214,6 +214,9 @@ def _emit_2d_assets(fs: Filesystem, out: Path) -> dict:
         f"#define INTRO_CLOUD_ATLAS_H {clouds.height}u",
         f"extern const uint8_t intro_cloud_atlas_4bpp[{len(clouds.pixels)}u];",
         "extern const uint16_t intro_cloud_palette[16u];",
+        f"#define INTRO_CLOUD_COUNT {len(clouds.rects)}u",
+        "/* x, y, w, h of each cloud in the atlas: big, top-right, mid-right, bottom-left */",
+        f"extern const uint16_t intro_cloud_rects[{len(clouds.rects)}u][4];",
         "",
     ]
     c_lines += [
@@ -223,6 +226,10 @@ def _emit_2d_assets(fs: Filesystem, out: Path) -> dict:
         "",
         "const uint16_t intro_cloud_palette[16u] = {",
         _fmt_u16_array(clouds.palette, 8),
+        "};",
+        "",
+        f"const uint16_t intro_cloud_rects[{len(clouds.rects)}u][4] = {{",
+        *[f"    {{{x}u, {y}u, {w}u, {h}u}}," for x, y, w, h in clouds.rects],
         "};",
         "",
     ]

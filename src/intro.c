@@ -401,26 +401,25 @@ static uint8_t sample_cloud_4bpp(uint16_t x, uint16_t y) {
 
 typedef struct {
     int16_t dst_x, dst_y;
-    uint16_t src_x, src_y, w, h;
+    uint8_t cloud;   /* index into intro_cloud_rects */
 } cloud_stamp_t;
 
 static void init_vdp2_sky_backdrop(void) {
     build_vdp2_palettes();
 
-    /* Stamp the 4 volumetric ROM clouds from intro_cloud_atlas_4bpp across a seamless 512x256 VDP2 bitmap. */
+    /* Stamp the 4 ROM clouds across a seamless 512x256 VDP2 bitmap. Each atlas
+     * box holds exactly one whole cloud (the extractor rejoins the OBJ pieces),
+     * so a stamp never cuts a cloud or drags in part of another. */
+    enum { BIG = 0, TOP_RIGHT = 1, MID_RIGHT = 2, BOTTOM_LEFT = 3 };
     static const cloud_stamp_t stamps[] = {
-        /* Large main cloud (src 11,0 -> 173x78) */
-        {  16,  18,  11,  0, 173, 78 },
-        { 276, 124,  11,  0, 173, 78 },
-        /* Top-right puffy cloud (src 186,1 -> 66x37) */
-        { 228,  22, 186,  1,  66, 37 },
-        { 430,  34, 186,  1,  66, 37 },
-        /* Mid-right cloud (src 156,42 -> 99x54) */
-        { 334,  62, 156, 42,  99, 54 },
-        {  96, 146, 156, 42,  99, 54 },
-        /* Bottom-left cloud (src 4,81 -> 116x47) */
-        {  10, 106,   4, 81, 116, 47 },
-        { 208, 168,   4, 81, 116, 47 },
+        {  16,  18, BIG },
+        { 276, 124, BIG },
+        { 228,  22, TOP_RIGHT },
+        { 430,  34, TOP_RIGHT },
+        { 334,  62, MID_RIGHT },
+        {  96, 146, MID_RIGHT },
+        {  10, 106, BOTTOM_LEFT },
+        { 208, 168, BOTTOM_LEFT },
     };
 
     static uint8_t row_buf[512];
@@ -429,10 +428,11 @@ static void init_vdp2_sky_backdrop(void) {
         fill_u8(row_buf, sky_idx, 512u);
         for (uint32_t s = 0u; s < (uint32_t)(sizeof(stamps) / sizeof(stamps[0])); ++s) {
             const cloud_stamp_t* st = &stamps[s];
-            if ((int32_t)y < st->dst_y || (int32_t)y >= st->dst_y + (int32_t)st->h) continue;
-            uint16_t sy = (uint16_t)(st->src_y + (uint16_t)((int32_t)y - st->dst_y));
-            for (uint16_t dx = 0u; dx < st->w; ++dx) {
-                uint8_t ci = sample_cloud_4bpp((uint16_t)(st->src_x + dx), sy);
+            const uint16_t* r = intro_cloud_rects[st->cloud];
+            if ((int32_t)y < st->dst_y || (int32_t)y >= st->dst_y + (int32_t)r[3]) continue;
+            uint16_t sy = (uint16_t)(r[1] + (uint16_t)((int32_t)y - st->dst_y));
+            for (uint16_t dx = 0u; dx < r[2]; ++dx) {
+                uint8_t ci = sample_cloud_4bpp((uint16_t)(r[0] + dx), sy);
                 if (ci != 0u) {
                     uint16_t wx = (uint16_t)((st->dst_x + (int32_t)dx) & 511);
                     row_buf[wx] = (uint8_t)(64u + ci);

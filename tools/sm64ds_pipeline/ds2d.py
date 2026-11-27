@@ -40,8 +40,11 @@ class SpriteRgb555:
 class CloudAtlas4bpp:
     width: int
     height: int
-    pixels: bytes  # 4bpp packed (2 pixels/byte, low nibble=left? No: Saturn high nibble=left)
+    pixels: bytes  # 4bpp packed, Saturn order: high nibble = left pixel
     palette: tuple[int, ...]  # 16 Saturn BGR555 CRAM words (without bit 15)
+    # One (x, y, w, h) box per cloud, in source order (top-left first): big,
+    # top-right, mid-right, bottom-left. Each box holds only that cloud.
+    rects: tuple[tuple[int, int, int, int], ...] = ()
 
 
 def ds_bgr555_to_saturn(val: int, *, direct: bool = True) -> int:
@@ -282,24 +285,86 @@ def render_peach_letter_card(
 
 
 def extract_cloud_atlas(fs: Filesystem) -> CloudAtlas4bpp:
-    """Extract SM64DS volumetric clouds (256x128 4bpp, Saturn nibble order) + 16-color CRAM palette."""
+    """Extract the SM64DS title clouds as a 4bpp atlas (Saturn nibble order)
+    plus their 16-color CRAM palette, one separate box per cloud.
+
+    The source is 512 OBJ tiles (32 x 16, 256x128) that the game assembles
+    with OAM in code, so the raw grid is not a picture: the bottom-left
+    cloud's last 16 rows sit in a strip at x 176..255, rows 112..127, next
+    to a solid 32x16 sky block at x 144..175, and the big cloud's box
+    overlaps the mid-right cloud. Copying rectangles straight out of the raw
+    grid therefore cut clouds and dragged in pieces of their neighbours.
+    Here the strip is put back under its cloud, the sky block dropped, and
+    every cloud copied by its own pixel mask into its own box.
+    """
     ncg = lz77_auto(fs.read(CLOUD_OBJ_NCG_PATH))
     pals = decode_ncl_palettes(fs.read(CLOUD_OBJ_NCL_PATH), direct=False)
-    # 512 4bpp tiles laid out 32 tiles wide x 16 tiles high = 256x128
-    width, height = 256, 128
+    src_w, src_h = 256, 128
+    joined_h = src_h + 16
+    grid = [[0] * src_w for _ in range(joined_h)]
+    for y in range(src_h):
+        for x in range(src_w):
+            grid[y][x] = _sample_ncg_4bpp(ncg, (y >> 3) * 32 + (x >> 3), x & 7, y & 7)
+    for y in range(112, 128):
+        for x in range(144, 256):
+            if x >= 176:
+                grid[y + 16][x - 152] = grid[y][x]
+            grid[y][x] = 0
+
+    # 8-connected clouds, ordered by their top-left corner.
+    seen = [[False] * src_w for _ in range(joined_h)]
+    clouds = []
+    for y0 in range(joined_h):
+        for x0 in range(src_w):
+            if not grid[y0][x0] or seen[y0][x0]:
+                continue
+            seen[y0][x0] = True
+            stack, pts = [(x0, y0)], []
+            while stack:
+                x, y = stack.pop()
+                pts.append((x, y))
+                for ny in (y - 1, y, y + 1):
+                    for nx in (x - 1, x, x + 1):
+                        if 0 <= nx < src_w and 0 <= ny < joined_h and grid[ny][nx] and not seen[ny][nx]:
+                            seen[ny][nx] = True
+                            stack.append((nx, ny))
+            clouds.append(pts)
+    clouds = [c for c in clouds if len(c) >= 256]   # drop stray specks
+    if len(clouds) != 4:
+        raise FormatError(f"expected 4 title clouds, found {len(clouds)}")
+    boxes = []
+    for pts in clouds:
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        boxes.append((min(ys), min(xs), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1, pts))
+    boxes.sort(key=lambda b: (b[0], b[1]))
+
+    # First-fit shelf packing into a 256-wide atlas, tallest first, 2px apart.
+    width = 256
+    place = {}
+    shelves = []   # [y, height, next x]
+    for i in sorted(range(4), key=lambda i: -boxes[i][3]):
+        _, _, w, h, _ = boxes[i]
+        shelf = next((sh for sh in shelves if sh[1] >= h and sh[2] + w <= width), None)
+        if shelf is None:
+            shelf = [shelves[-1][0] + shelves[-1][1] + 2 if shelves else 0, h, 0]
+            shelves.append(shelf)
+        place[i] = (shelf[2], shelf[0])
+        shelf[2] += w + 2
+    height = (shelves[-1][0] + shelves[-1][1] + 7) & ~7
+    out = [[0] * width for _ in range(height)]
+    rects = []
+    for i, (top, left, w, h, pts) in enumerate(boxes):
+        px, py = place[i]
+        for x, y in pts:
+            out[py + y - top][px + x - left] = grid[y][x]
+        rects.append((px, py, w, h))
     packed = bytearray((width * height) // 2)
     for y in range(height):
-        ty = y >> 3
-        sy = y & 7
         for x in range(0, width, 2):
-            tx = x >> 3
-            sx0 = x & 7
-            tile_id = ty * 32 + tx
-            c0 = _sample_ncg_4bpp(ncg, tile_id, sx0, sy)
-            c1 = _sample_ncg_4bpp(ncg, tile_id, sx0 + 1, sy)
-            # Saturn 4bpp order: high nibble = left pixel, low nibble = right pixel
-            packed[(y * width + x) >> 1] = ((c0 & 0xF) << 4) | (c1 & 0xF)
-    return CloudAtlas4bpp(width=width, height=height, pixels=bytes(packed), palette=pals[0])
+            packed[(y * width + x) >> 1] = ((out[y][x] & 0xF) << 4) | (out[y][x + 1] & 0xF)
+    return CloudAtlas4bpp(width=width, height=height, pixels=bytes(packed),
+                          palette=pals[0], rects=tuple(rects))
 
 
 def decode_ncl_palette16(blob: bytes, *, direct: bool = True) -> tuple[int, ...]:

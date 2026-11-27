@@ -78,9 +78,18 @@ class TestIntroPipelineWithRom(unittest.TestCase):
         self.assertTrue(all(p & 0x8000 for p in card.pixels))
 
         clouds = extract_cloud_atlas(self.fs)
-        self.assertEqual((clouds.width, clouds.height), (256, 128))
-        self.assertEqual(len(clouds.pixels), 16384)
+        self.assertEqual(clouds.width, 256)
+        self.assertEqual(len(clouds.pixels), clouds.width * clouds.height // 2)
         self.assertEqual(len(clouds.palette), 16)
+        # Four whole clouds, each alone in its box: the bottom-left cloud got
+        # its 16-row strip back (47 + 16 rows) and no boxes overlap.
+        self.assertEqual(len(clouds.rects), 4)
+        self.assertEqual(clouds.rects[3][2:], (116, 63))
+        for i, (ax, ay, aw, ah) in enumerate(clouds.rects):
+            self.assertLessEqual(ax + aw, clouds.width)
+            self.assertLessEqual(ay + ah, clouds.height)
+            for bx, by, bw, bh in clouds.rects[i + 1:]:
+                self.assertTrue(ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay)
 
     def test_real_title_logos(self):
         # The Nintendo boot logo is the real 8bpp 128x16 NSC (red oval +
