@@ -193,7 +193,10 @@ static sat_scene3d_instance_binding_t chunk_bindings[CASTLE_CHUNK_COUNT] __attri
 static uint32_t keys[CAP] __attribute__((section(".wram_l"),aligned(4)));
 static uint16_t order[CAP] __attribute__((section(".wram_l"),aligned(4)));
 static sat_scene_t scene;
-static sat_ascii_font_t font;
+/* Glyph descriptors only (VDP1 VRAM addresses), read when HUD text is drawn:
+ * Work RAM Low, like the texture descriptors, to keep Work RAM High's stack
+ * reserve. */
+static sat_ascii_font_t font __attribute__((section(".wram_l"),aligned(4)));
 static sm64ds_background_t castle;
 #ifdef CASTLE_ROOM_CULLING
 static sat_mesh_t room_meshes[CASTLE_ROOM_COUNT];
@@ -577,8 +580,9 @@ static void update_water_tint(void) {
  * chunks, before the actors, at the water pass. */
 /* The moat and pond span the whole grounds (about 960 x 832 units), so the
  * rings must reach far enough that the water is visible from the lawn: a
- * 16-unit cell with four rings covers +-512 units around the camera. */
-enum { WATER_PLANE_CELLS=8, WATER_PLANE_RINGS=4 };
+ * 32-unit cell on a 4x4 grid with four rings covers the same +-512 units as
+ * the old 16-unit 8x8 grid with a third of the per-frame vertices and faces. */
+enum { WATER_PLANE_CELLS=4, WATER_PLANE_RINGS=4 };
 /* Textured water grid: the original MC_WATER texture is a 32x32 repeat tile
  * scrolled diagonally by its BTA. Saturn's scene3d quad path maps a whole
  * texture per quad, so the scroll is baked into a ring of phase textures and
@@ -605,7 +609,12 @@ static void water_texture_init(void) {
         .rgb555 = SAT_RGB555(5,16,26),
         .texture = &water_tex_uploaded[0],
         .color_calc_slot = SAT_INDEXED_SOLID_OPAQUE,
-        .sprite_flags = 0,
+        /* The DS moat is translucent: the moat floor and a submerged
+         * Mario, drawn in the far pass, show through. The VDP1's
+         * checkerboard mesh is the Saturn's way to do that on an indexed
+         * texture (half-transparency would need an RGB framebuffer read
+         * over the whole surface). */
+        .sprite_flags = SAT_SPRITE_FLAG_MESH,
     };
 }
 /* The BTA scrolls transS 0..4096 over 91 frames (one full tile); the ring has
@@ -636,7 +645,7 @@ static void draw_water_texture(uint16_t pass) {
     const sat_water_plane_config_t cfg={
         .min_x=CASTLE_WATER_REGION_X0,.max_x=CASTLE_WATER_REGION_X1,
         .min_z=CASTLE_WATER_REGION_Z0,.max_z=CASTLE_WATER_REGION_Z1,
-        .surface=CASTLE_WATER_Y,.cell=16*ONE,.cells=WATER_PLANE_CELLS,.rings=WATER_PLANE_RINGS,
+        .surface=CASTLE_WATER_Y,.cell=32*ONE,.cells=WATER_PLANE_CELLS,.rings=WATER_PLANE_RINGS,
         .underside=(uint8_t)(camera.eye.y<CASTLE_WATER_Y),
         .wobble=0,.period=12*ONE,.speed=6,.tick=player.ticks,
         .near_color=sat_gouraud_rgb(-11,0,10),.far_color=sat_gouraud_rgb(-8,4,12),
@@ -816,7 +825,13 @@ static void submit_mario_shadow(void) {
         {c.x+u.x+v.x,c.y+u.y+v.y,c.z+u.z+v.z},
         {c.x-u.x+v.x,c.y-u.y+v.y,c.z-u.z+v.z}
     }};
-    SAT_PANIC_IF_ERROR(sat_scene_submit_quad(&scene,&quad,&shadow_material,SM64DS_ACTOR_PASS));
+    uint16_t pass=SM64DS_ACTOR_PASS;
+#ifdef CASTLE_WATER_PLANE
+    /* A shadow on the moat floor lies under the water: seen from above it
+     * belongs to the far pass, behind the surface, like the floor itself. */
+    if (floor_y<CASTLE_WATER_Y && camera.eye.y>=CASTLE_WATER_Y) pass=SM64DS_FAR_WATER_PASS;
+#endif
+    SAT_PANIC_IF_ERROR(sat_scene_submit_quad(&scene,&quad,&shadow_material,pass));
 }
 
 #include "castle_props.inc"
@@ -1661,6 +1676,20 @@ int main(void) {
             submit_mario_shadow();
 #if (!SM64DS_VISUAL_DIAGNOSTICS && defined(CASTLE_SUPPORT_PLANE_LIST_AVAILABLE)) || (SM64DS_VISUAL_DIAGNOSTICS && SM64DS_DIAG_FAR_DEPTH_COUNT > 0 && (SM64DS_DIAG_PAIR_DEPTH || SM64DS_DIAG_SUPPORT_DEPTH))
         uint16_t actor_first=scene.faces.count;
+#endif
+#ifdef CASTLE_WATER_PLANE
+        /* The VDP1 has no depth buffer: the water plane is one painter pass
+         * between the far side of the surface and the near side. A swimming
+         * Mario lies across it, so his faces wholly under the surface go to
+         * the far pass and the water covers them, like the DS. Seen from
+         * below, the roles swap: faces under the surface stay in front. */
+        {
+            const uint8_t eye_above=camera.eye.y>=CASTLE_WATER_Y;
+            const uint16_t near_pass=SM64DS_ACTOR_PASS,far_pass=SM64DS_FAR_WATER_PASS;
+            actor.split_y=head.instance.split_y=CASTLE_WATER_Y;
+            actor.pass=head.instance.pass=eye_above?near_pass:far_pass;
+            actor.split_pass=head.instance.split_pass=eye_above?far_pass:near_pass;
+        }
 #endif
         if ((!SM64DS_VISUAL_DIAGNOSTICS || (SM64DS_DIAG_OBJECTS&4))
 #if defined(CASTLE_INTRO_PROPS_AVAILABLE) && !SM64DS_VISUAL_DIAGNOSTICS

@@ -140,37 +140,45 @@ static void order_support_behind_actor(uint16_t castle_first,uint16_t castle_end
     /* Near-clipped horizontal floor/carpet fallback faces (!projected_safe) are
      * skipped by the unclipped vertex test above because a corner lies behind
      * the camera. Use their exact 3D world corners to keep floors between the
-     * camera and Mario behind Mario without disturbing distant geometry. */
-    const uint32_t clipped_pushed=((uint32_t)group<<24)|(actor_max<0xfffffcu?actor_max+2u:actor_max);
-    const int32_t sx0=(camera.eye.x<player.feet.x?camera.eye.x:player.feet.x)-12*ONE;
-    const int32_t sx1=(camera.eye.x>player.feet.x?camera.eye.x:player.feet.x)+12*ONE;
-    const int32_t sz0=(camera.eye.z<player.feet.z?camera.eye.z:player.feet.z)-12*ONE;
-    const int32_t sz1=(camera.eye.z>player.feet.z?camera.eye.z:player.feet.z)+12*ONE;
-    for (uint16_t q=castle_first;q<castle_end;++q) {
-        uint32_t qk=scene.faces.keys[q];
-        if ((qk>>24)!=group || (qk&0xffffffu)>=actor_max) continue;
-        /* Hot projected entries are always projected-safe: only a full
-         * record can be a clipped fallback, and it is read in place. */
-        const sat_scene3d_face_t *full=sat_scene3d_faces_full(&scene.faces,q);
-        if (!full || full->projected_safe) continue;
-        int32_t min_x=full->world.v[0].x,max_x=min_x;
-        int32_t min_y=full->world.v[0].y,max_y=min_y;
-        int32_t min_z=full->world.v[0].z,max_z=min_z;
-        for (unsigned k=1;k<4;++k) {
-            int32_t wx=full->world.v[k].x,wy=full->world.v[k].y,wz=full->world.v[k].z;
-            if (wx<min_x) min_x=wx;
-            if (wx>max_x) max_x=wx;
-            if (wy<min_y) min_y=wy;
-            if (wy>max_y) max_y=wy;
-            if (wz<min_z) min_z=wz;
-            if (wz>max_z) max_z=wz;
+     * camera and Mario behind Mario without disturbing distant geometry.
+     *
+     * A candidate must satisfy both camera.eye.y <= max_y + ONE/4 and
+     * max_y <= player.feet.y + ONE/2, so no face can qualify when the camera
+     * is more than 3/4 unit above Mario's feet. Skip the full castle-queue
+     * walk in that common case (the usual third-person view is several units
+     * above him). */
+    if (camera.eye.y <= player.feet.y + ONE) {
+        const uint32_t clipped_pushed=((uint32_t)group<<24)|(actor_max<0xfffffcu?actor_max+2u:actor_max);
+        const int32_t sx0=(camera.eye.x<player.feet.x?camera.eye.x:player.feet.x)-12*ONE;
+        const int32_t sx1=(camera.eye.x>player.feet.x?camera.eye.x:player.feet.x)+12*ONE;
+        const int32_t sz0=(camera.eye.z<player.feet.z?camera.eye.z:player.feet.z)-12*ONE;
+        const int32_t sz1=(camera.eye.z>player.feet.z?camera.eye.z:player.feet.z)+12*ONE;
+        for (uint16_t q=castle_first;q<castle_end;++q) {
+            uint32_t qk=scene.faces.keys[q];
+            if ((qk>>24)!=group || (qk&0xffffffu)>=actor_max) continue;
+            /* Hot projected entries are always projected-safe: only a full
+             * record can be a clipped fallback, and it is read in place. */
+            const sat_scene3d_face_t *full=sat_scene3d_faces_full(&scene.faces,q);
+            if (!full || full->projected_safe) continue;
+            int32_t min_x=full->world.v[0].x,max_x=min_x;
+            int32_t min_y=full->world.v[0].y,max_y=min_y;
+            int32_t min_z=full->world.v[0].z,max_z=min_z;
+            for (unsigned k=1;k<4;++k) {
+                int32_t wx=full->world.v[k].x,wy=full->world.v[k].y,wz=full->world.v[k].z;
+                if (wx<min_x) min_x=wx;
+                if (wx>max_x) max_x=wx;
+                if (wy<min_y) min_y=wy;
+                if (wy>max_y) max_y=wy;
+                if (wz<min_z) min_z=wz;
+                if (wz>max_z) max_z=wz;
+            }
+            if (max_y-min_y>ONE*2) continue;
+            if (camera.eye.y<=max_y+ONE/4) continue;
+            if (player.feet.y+ONE/2<max_y) continue;
+            if (max_x<sx0 || min_x>sx1 || max_z<sz0 || min_z>sz1) continue;
+            scene.faces.keys[q]=clipped_pushed;
+            ++hud_support_pushed;
         }
-        if (max_y-min_y>ONE*2) continue;
-        if (camera.eye.y<=max_y+ONE/4) continue;
-        if (player.feet.y+ONE/2<max_y) continue;
-        if (max_x<sx0 || min_x>sx1 || max_z<sz0 || min_z>sz1) continue;
-        scene.faces.keys[q]=clipped_pushed;
-        ++hud_support_pushed;
     }
 #if defined(CASTLE_ROOM_CULLING) && defined(CASTLE_FLOOR_DECAL_COUNT)
     /* Keep room-0 floor decals (Sun Carpet) cleanly over the sunken pit floor

@@ -74,7 +74,8 @@ static void draw_debug_hud(const sat_scene_stats_t *stats,uint32_t fps,
         hud_draw_text(2,2,b.data);
         return;
     }
-    static const char *const clip_names[4]={"IDL","WLK","RUN","JMP"};
+    /* 4 and 5 are the swim clips: the stroke and treading water. */
+    static const char *const clip_names[6]={"IDL","WLK","RUN","JMP","SWM","FLT"};
     hud_draw_box(0,1,320,20);
     /* Line 1: timing, CPU work, VDP1 commands/capacity, late VBlanks, VRAM free */
     b.len=0;b.data[0]='\0';
@@ -106,8 +107,8 @@ static void draw_debug_hud(const sat_scene_stats_t *stats,uint32_t fps,
     hud_put_i32(&b,player.feet.y/ONE);hud_put_str(&b,",");
     hud_put_i32(&b,player.feet.z/ONE);
     hud_put_str(&b," F:");hud_put_i32(&b,facing);
-    hud_put_str(&b,paused?" P PAU":(player.grounded?" G ":" A "));
-    if (!paused) hud_put_str(&b,clip<4u?clip_names[clip]:"???");
+    hud_put_str(&b,paused?" P PAU":(player.swimming?" W ":player.grounded?" G ":" A "));
+    if (!paused) hud_put_str(&b,clip<6u?clip_names[clip]:"???");
     hud_put_str(&b," NY:");
     if (hud_floor_ok) hud_put_i32(&b,hud_floor_ny_pct);
     else hud_put_str(&b,"--");
